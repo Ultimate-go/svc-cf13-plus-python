@@ -129,17 +129,134 @@ function logHead(title) {
   box.scrollTop = box.scrollHeight;
 }
 
-async function post(path, body = {}) {
-  const res = await fetch(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const data = await res.json().catch(() => ({ ok: false, error: "响应不是 JSON" }));
-  if (!res.ok || data.ok === false) {
-    throw new Error(data.error || `HTTP ${res.status}`);
+/* ------------------------------------------------------------ 实时进度
+ *
+ * 长任务（模数生成、切块承诺、分发）动辄几分钟，期间按钮是灰的、页面没反应。
+ * 这里在请求进行中轮询后端 /api/progress，显示：
+ *   - 真实的分步进度（分发阶段按服务器台数推进）
+ *   - 已用时间
+ *   - 按实测代价模型拟合的「预计总时长」
+ *
+ * 模数生成那一步耗时是随机的（实测 10 秒 ~ 3 分钟），给不出有意义的百分比，
+ * 所以用流动条纹表示「在动」，不假装知道进度。
+ */
+
+const STEP_LABEL = {
+  setup: "① 生成公开参数",
+  commit: "② 切块并承诺",
+  distribute: "③ 分发到服务器",
+  retrieve: "④ 跨服务器检索",
+  aggregate: "⑤ 聚合证据",
+  verify: "⑥ 客户端验证",
+  attack: "☠ 构造攻击",
+};
+
+function fmtDur(ms) {
+  if (ms < 1000) return `${ms.toFixed(0)} ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)} s`;
+  const m = Math.floor(ms / 60000);
+  return `${m} 分 ${((ms % 60000) / 1000).toFixed(0)} 秒`;
+}
+
+/** 按实测拟合的代价模型粗估该步耗时（毫秒）；返回 null 表示估不出来。 */
+function predictMs(step) {
+  const bb = +$("block_bytes").value;
+  const mb = +$("modulus_bits").value;
+  if (!bb) return null;
+  const n = Math.max(1, Math.ceil(new TextEncoder().encode($("text").value).length / bb));
+  const eBits = n * (bb * 8 + 1);
+  const scale = Math.pow(Math.max(mb, 64) / 2048, 1.72);
+  const commit = 0.206 * eBits * scale;
+  if (step === "commit") return commit;
+  if (step === "distribute") return 0.87 * (+$("n_nodes").value || 1) * commit;
+  return null;   // setup（模数生成）与几个快步骤不估
+}
+
+let progTimer = null;
+
+function beginProgress(step) {
+  // 防御：上一步的定时器万一没清掉，会让新面板显示旧数据
+  if (progTimer) {
+    clearInterval(progTimer);
+    progTimer = null;
   }
-  return data;
+  $("panel-progress").hidden = false;
+  $("prog-phase").textContent = STEP_LABEL[step] || step;
+  $("prog-sub").textContent = "正在启动…";
+  const fill = $("prog-fill");
+  fill.classList.remove("done", "waiting");
+  fill.style.width = "0%";
+
+  const predict = predictMs(step);
+  const t0 = performance.now();
+
+  const tick = async () => {
+    let st = null;
+    try {
+      st = await (await fetch("/api/progress")).json();
+    } catch (_) {
+      /* 轮询失败不影响主请求 */
+    }
+    const elapsed = performance.now() - t0;
+    $("prog-time").textContent = fmtDur(elapsed);
+
+    if (!st || !st.running) return;
+    const hasSteps = st.total > 0;
+    if (hasSteps) {
+      fill.style.width = `${Math.min(100, (st.done / st.total) * 100).toFixed(1)}%`;
+      $("prog-sub").textContent =
+        `${st.phase} · ${st.done}/${st.total}` + (st.detail ? ` · ${st.detail}` : "");
+      fill.classList.remove("waiting");
+    } else {
+      fill.classList.add("waiting");
+      $("prog-sub").textContent = st.detail || st.phase || "进行中";
+    }
+    if (predict) {
+      const left = Math.max(0, predict - elapsed);
+      const tail = left > 0 ? `，预计还要 ${fmtDur(left)}` : "，已超出预估";
+      $("prog-sub").textContent += `（预计总共约 ${fmtDur(predict)}${tail}）`;
+    }
+  };
+
+  tick();
+  progTimer = setInterval(tick, 250);
+}
+
+function endProgress(ms = null) {
+  if (progTimer) {
+    clearInterval(progTimer);
+    progTimer = null;
+  }
+  const fill = $("prog-fill");
+  fill.classList.remove("waiting");
+  fill.classList.add("done");
+  fill.style.width = "100%";
+  if (ms != null) $("prog-time").textContent = fmtDur(ms);
+  setTimeout(() => {
+    $("panel-progress").hidden = true;
+  }, 700);
+}
+
+/* ------------------------------------------------------------ 工具 */
+
+async function post(path, body = {}, step = null) {
+  if (step) beginProgress(step);
+  try {
+    const res = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({ ok: false, error: "响应不是 JSON" }));
+    if (step) endProgress(typeof data.ms === "number" ? data.ms : null);
+    if (!res.ok || data.ok === false) {
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+    return data;
+  } catch (err) {
+    if (step) endProgress();
+    throw err;
+  }
 }
 
 /* ------------------------------------------------------------ 渲染函数 */
@@ -253,7 +370,7 @@ async function doSetup() {
     block_bytes: +$("block_bytes").value,
     modulus_bits: +$("modulus_bits").value,
     seed: "web-demo",
-  });
+  }, "setup");
   log(
     `|N| = ${r.params.N_bits} 位，g = ${r.params.g}，n_max = ${r.params.n_max}，` +
     `每块 ${r.params.block_bytes} 字节（l = ${r.params.l} 位，素数 ${r.params.prime_bits} 位）`,
@@ -263,7 +380,7 @@ async function doSetup() {
 
 async function doCommit() {
   logHead("② 切块并承诺");
-  const r = await post("/api/commit", { text: $("text").value });
+  const r = await post("/api/commit", { text: $("text").value }, "commit");
   renderDigest(r.digest);
   log(`${r.nbytes} 字节 → ${r.n} 块`, "ok", r.ms);
   log(`U = ${r.digest.U.fp} (${r.digest.U.bits} 位)，C = ${r.digest.C.fp} (${r.digest.C.bits} 位) —— 摘要与文件大小无关`);
@@ -271,7 +388,7 @@ async function doCommit() {
 
 async function doDistribute() {
   logHead("③ 分发到服务器");
-  const r = await post("/api/distribute", { nodes: +$("n_nodes").value });
+  const r = await post("/api/distribute", { nodes: +$("n_nodes").value }, "distribute");
   renderNodes(r.nodes);
   log(`${r.nodes.length} 台服务器各自拿到一块子集与一个证据`, "ok", r.ms);
   for (const nd of r.nodes) {
@@ -281,7 +398,7 @@ async function doDistribute() {
 
 async function doRetrieve() {
   logHead("④ 跨服务器检索");
-  const r = await post("/api/retrieve", {});
+  const r = await post("/api/retrieve", {}, "retrieve");
   renderCerts(r);
   log(`请求下标 [${r.Q.join(",")}]，落在 ${r.servers.length} 台服务器上`, "ok", r.ms);
   for (const c of r.certs) {
@@ -291,14 +408,14 @@ async function doRetrieve() {
 
 async function doAggregate() {
   logHead("⑤ 聚合多份证据成一个");
-  const r = await post("/api/aggregate", {});
+  const r = await post("/api/aggregate", {}, "aggregate");
   renderMerged(r);
   log(`${r.merged_from} 份证据 → 1 份，覆盖 [${r.I.join(",")}]`, "ok", r.ms);
 }
 
 async function doVerify() {
   logHead("⑥ 客户端验证");
-  const r = await post("/api/verify", {});
+  const r = await post("/api/verify", {}, "verify");
   renderVerify(r);
   log(r.ok ? `验证通过：${r.Q.length} 块内容全部完整` : `验证失败：${r.code} —— ${r.message}`,
       r.ok ? "ok" : "bad", r.ms);
@@ -306,7 +423,7 @@ async function doVerify() {
 
 async function doAttack(kind) {
   logHead(kind === "tamper" ? "☠ 攻击：服务器篡改内容" : "☠ 攻击：服务器伪造证据");
-  const a = await post("/api/attack", { kind, node: 0 });
+  const a = await post("/api/attack", { kind, node: 0 }, "attack");
   log(a.message, "bad");
   log(`  ${a.node} 的本地视图检查：${a.node_valid ? "通过" : "已失败"}`);
   await refreshNodes();
@@ -359,7 +476,8 @@ async function doReset() {
   state.certs = [];
   state.merged = null;
   $("log").innerHTML = "";
-  for (const id of ["panel-digest", "panel-nodes", "panel-flow"]) $(id).hidden = true;
+  for (const id of ["panel-digest", "panel-nodes", "panel-flow", "panel-progress"]) $(id).hidden = true;
+  endProgress();
   $("nodes").innerHTML = "";
   $("certs-list").innerHTML = "—";
   $("merged-body").innerHTML = "—";

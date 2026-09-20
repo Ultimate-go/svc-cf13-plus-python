@@ -19,6 +19,8 @@
 | **常量摘要** | 客户端只保存 `δ = ((U, C), n)` —— 两个群元素 + 一个整数，与文件大小无关 |
 | **常量证据** | 一次打开的证据是 `π_I = (S_I, Λ_I)` —— 两个群元素，与打开多少块无关 |
 | **增量聚合** | 从多台服务器拿到的多份证据能合成**一个**；合并结果仍是合法证明，可无限次继续合并 |
+| **存储证明** | 不下载任何内容，也能确认全网确实还存着文件（附录 D.1 的 PoR/PDP） |
+| **可验证更新** | 增删改走两段式：持有改动内容的一方产出更新密钥 `Υ∆`，其他节点**无需该内容**就能校验并跟上 |
 
 验证代价与块数、文件长度**无关**：客户端拿到聚合后的那一个证据，
 用自己手里的摘要一次校验就完事。
@@ -65,20 +67,23 @@ python_SVC_v1/
 │  ├─ groups.py            隐藏阶群生成（#9）
 │  ├─ primegen.py          下标→素数映射（#10、#11）
 │  ├─ scheme.py            中间量 + 本体 + 聚合拆分（#12~#26）
+│  ├─ fastopen.py          §4.2 预处理提交与快速打开（PPCom / FastOpen）
 │  ├─ rng.py               可复现随机源
 │  └─ types.py             数据结构
 ├─ vds/                    ★ 可验证分布式存储（论文 §8.2）
 │  ├─ digest.py            摘要 δ 与本地视图
 │  ├─ encoding.py          文件 ↔ 块
-│  ├─ storage_node.py      StrgNode.*（AddStorage / RmvStorage / Retrieve）
-│  ├─ client_node.py       ClntNode.*（AggregateCertificates / VerRetrieve）
-│  ├─ updates.py           文件增删改（PushUpdate / ApplyUpdate）
+│  ├─ storage_node.py      StrgNode.*（AddStorage / RmvStorage / Retrieve / PoS-Prove）
+│  ├─ client_node.py       ClntNode.*（AggregateCertificates / VerRetrieve / PoS-Ver）
+│  ├─ updates.py           两段式更新（PushUpdate / ApplyUpdate）
+│  ├─ pos.py               附录 D.1 存储证明（PoS / 并行 PoS）
 │  └─ vds.py               VDSSession，串起全流程
 ├─ server/app.py           零依赖演示后端（标准库 http.server）
 ├─ web/                    前端页面（原生 HTML/CSS/JS，无构建步骤）
-├─ tests/                  232 个测试
+├─ tests/                  321 个测试
 ├─ demo/end_to_end.py      命令行端到端演示
 ├─ bench/bench_scale.py    规模与性能测试
+├─ tools/fix_md_math.py    维护脚本：把文档里的 LaTeX 换成 Unicode
 └─ docs/                   设计说明与论文对照
 ```
 

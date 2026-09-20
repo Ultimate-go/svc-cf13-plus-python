@@ -142,6 +142,32 @@ class ClientNode:
         return Q, F_Q, self.ver_retrieve(Q, F_Q, pi_K)
 
     # -------------------------------------------------------------------
+    # ClntNode.PoS-Challenge / PoS-Ver（附录 D.1）
+    # -------------------------------------------------------------------
+
+    def pos_challenge(self, lambda_pos: int | None = None, rng=None):
+        """``ClntNode.PoS-Challenge`` —— 生成一份存储证明挑战。
+
+        只需要文件长度 ``δ.n``，不需要文件内容。
+        """
+        from .pos import DEFAULT_LAMBDA_POS, pos_challenge
+
+        return pos_challenge(
+            self.delta.n,
+            DEFAULT_LAMBDA_POS if lambda_pos is None else lambda_pos,
+            rng,
+        )
+
+    def pos_ver(self, challenge, proof) -> VerifyReport:
+        """``ClntNode.PoS-Ver`` —— 验证收齐的存储证明。
+
+        两道判据：``Q = r`` 且 ``VerRetrieve`` 通过。
+        """
+        from .pos import pos_ver
+
+        return pos_ver(self, challenge, proof)
+
+    # -------------------------------------------------------------------
     # ClntNode.GetCreate —— 需要 PoKSubV，未实现
     # -------------------------------------------------------------------
 

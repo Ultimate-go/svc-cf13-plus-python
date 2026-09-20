@@ -22,6 +22,8 @@
 :mod:`vds.encoding`            文件 ↔ 块 的编码
 :mod:`vds.storage_node`        ``StrgNode.*``
 :mod:`vds.client_node`         ``ClntNode.*``
+:mod:`vds.updates`             §8.2 的两段式更新（``PushUpdate``/``ApplyUpdate``）
+:mod:`vds.pos`                 附录 D.1 的存储证明（PoR / PDP）
 :mod:`vds.vds`                 :class:`~vds.vds.VDSSession`，组装全流程
 ============================  ==========================================
 
@@ -42,11 +44,21 @@
     Q, values_out, report = client.retrieve_and_verify(certs)
     assert report.ok
 
+已实现的范围
+------------
+* §7 / §8.2 的全部接口，除了下面两项；
+* §8.2 的三种文件更新（``mod`` / ``add`` / ``del``）走**两段式**：
+  :func:`push_update` 产出 :math:`\\Upsilon_\\Delta`，:func:`apply_update`
+  先校验它再应用 —— 后者**不需要改动后的内容**；
+* 附录 D.1 的存储证明（PoR / PDP）见 :mod:`vds.pos`。
+
 未实现的部分
 ------------
-``StrgNode.CreateFrom`` 与 ``ClntNode.GetCreate`` **未实现**，
-它们依赖论文 §6 的独立协议 ``PoKSubV``（子向量知识论证）。
-主流程不受影响。详见 ``docs/与论文对照.md``。
+``StrgNode.CreateFrom`` 与 ``ClntNode.GetCreate`` **未实现**。
+它们依赖论文 §6 的 ``PoKSubV``，而 §6 是建在 **§5.1 阴阳方案**上的
+（双生成元 CRS、承诺为一对累加器、二元划分 ``PartndPrimeProd``），
+§5.2 不具备这些代数结构。主流程与 PoS 都不受影响。
+详见 ``docs/与论文对照.md``。
 """
 
 from __future__ import annotations
@@ -61,10 +73,25 @@ from .encoding import (
 )
 from .storage_node import StorageNode, UpdateDelta, UpdateWitness
 from .updates import (
+    AppliedUpdate,
+    PushedUpdate,
     UpdateRecord,
+    apply_update,
+    push_update,
     update_append,
     update_modify,
     update_truncate,
+)
+from .pos import (
+    Challenge,
+    PoSProof,
+    parallel_pos_challenge,
+    parallel_pos_verify,
+    pos_aggregate,
+    pos_aggregate_all,
+    pos_challenge,
+    pos_prove,
+    pos_ver,
 )
 from .vds import VDSSession
 
@@ -78,9 +105,23 @@ __all__ = [
     "UpdateDelta",
     "UpdateWitness",
     "UpdateRecord",
+    "PushedUpdate",
+    "AppliedUpdate",
+    "push_update",
+    "apply_update",
     "update_modify",
     "update_append",
     "update_truncate",
+    # 附录 D.1 存储证明
+    "Challenge",
+    "PoSProof",
+    "pos_challenge",
+    "pos_prove",
+    "pos_aggregate",
+    "pos_aggregate_all",
+    "pos_ver",
+    "parallel_pos_challenge",
+    "parallel_pos_verify",
     "split_bytes",
     "join_blocks",
     "blocks_for_length",

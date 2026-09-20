@@ -161,6 +161,35 @@ code { font-family: var(--mono); background: #0c0e13; padding: 1px 5px; border-r
 .log .line.head .m { color: var(--accent); font-weight: 600; }
 .log .line.err .m { color: #ff9b9b; }
 
+/* ---------------------------------------------------------------- 进度条 */
+.prog { display: flex; flex-direction: column; gap: 7px; }
+.prog-head { display: flex; justify-content: space-between; align-items: baseline; }
+.prog-head #prog-phase { font-size: 13px; font-weight: 600; }
+.prog-head #prog-time { color: var(--warn); font-size: 13px; }
+.prog-track {
+  height: 8px;
+  background: #0c0e13;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.prog-fill {
+  height: 100%;
+  width: 0;
+  background: linear-gradient(90deg, #3568b0, var(--accent));
+  border-radius: 6px;
+  transition: width .25s ease-out;
+}
+.prog-fill.done { background: linear-gradient(90deg, #2f8f4e, var(--ok)); }
+/* 拿不到分步进度时（模数生成）用流动条纹表示“在动” */
+.prog-fill.waiting {
+  width: 100% !important;
+  background: repeating-linear-gradient(90deg, #3568b0 0 12px, #23436f 12px 24px);
+  animation: progslide 1s linear infinite;
+}
+@keyframes progslide { to { background-position: 24px 0; } }
+.prog-sub { font-size: 11.5px; color: var(--dim); min-height: 1.6em; }
+
 footer { padding: 0 32px 36px; color: var(--dim); font-size: 12px; max-width: 1240px; margin: 0 auto; }
 
 /* ------------------------------------------------------------ 完整值展开

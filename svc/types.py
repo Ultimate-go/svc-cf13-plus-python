@@ -112,7 +112,7 @@ class VectorDigest(NamedTuple):
         S = g^{e_{[n]}}, \\qquad
         \\Lambda = \\prod_{i \\in [n]} \\left(S^{1/e_i}\\right)^{v_i}
 
-    这是整个方案**唯一**的核心对象。关键在于：
+    这是整个方案**唯一**的核心对象。要点：
 
     * ``VC.Com`` 返回的就是 :math:`d(\\mathbf{v})` 的 ``Lambda`` 分量
       （``S`` 分量就是 :math:`U_n`，在 ``Specialize`` 阶段已经算好）；

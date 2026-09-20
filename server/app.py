@@ -95,6 +95,108 @@ class DemoState:
 STATE = DemoState()
 
 
+# ---------------------------------------------------------------------------
+# 进度
+# ---------------------------------------------------------------------------
+
+class Progress:
+    """粗粒度的阶段进度，供前端在长任务期间轮询。
+
+    单独一把锁：业务状态那把锁在整个请求期间都被占着，
+    轮询接口不能去等它，否则进度查询会被长任务饿死。
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._reset()
+
+    def _reset(self) -> None:
+        self._running = False
+        self._phase = ""
+        self._done = 0
+        self._total = 0
+        self._detail = ""
+        self._t0 = 0.0
+        self._elapsed_ms = 0.0
+        self._history: list[dict] = []
+
+    def clear(self) -> None:
+        with self._lock:
+            self._reset()
+
+    def begin(self, phase: str, total: int = 0, detail: str = "") -> None:
+        with self._lock:
+            self._running = True
+            self._phase = phase
+            self._done, self._total = 0, total
+            self._detail = detail
+            self._t0 = time.perf_counter()
+
+    def tick(self, done: int, total: int | None = None, detail: str | None = None) -> None:
+        with self._lock:
+            self._done = done
+            if total is not None:
+                self._total = total
+            if detail is not None:
+                self._detail = detail
+
+    def finish(self) -> None:
+        """结束当前阶段。**幂等** —— 成功、失败、异常路径都该调它。"""
+        with self._lock:
+            if not self._running:
+                return
+            self._elapsed_ms = (time.perf_counter() - self._t0) * 1000.0
+            self._history.append({"phase": self._phase, "ms": round(self._elapsed_ms, 1)})
+            self._running = False
+            self._done = self._total or self._done
+            self._detail = ""
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            elapsed = self._elapsed_ms
+            if self._running:
+                elapsed = (time.perf_counter() - self._t0) * 1000.0
+            return {
+                "running": self._running,
+                "phase": self._phase,
+                "done": self._done,
+                "total": self._total,
+                "detail": self._detail,
+                "elapsed_ms": elapsed,
+                "history": list(self._history),
+            }
+
+
+PROGRESS = Progress()
+
+
+def estimate_ms(
+    n: int, l: int, modulus_bits: int, *, nodes: int = 0, kind: str = "commit"
+) -> float:
+    """按实测拟合的代价模型粗估耗时（毫秒），只作为前端「预计」的参考。
+
+    主因是 ``e_[n]`` 的位长 ``E = n·(l+1)``（模幂的指数长度），
+    模数按约 ``|N|^1.72`` 放大。实测标定点：
+
+    ====================  =================================  ==========
+    配置                   阶段                                 耗时
+    ====================  =================================  ==========
+    |N|=2048, n=1024, l=128  commit                              27.0 s
+    |N|=4096, n=512,  l=128  commit                              49.1 s
+    |N|=4096, n=512,  l=128  distribute（8 台）                 378.9 s
+    ====================  =================================  ==========
+
+    没有覆盖到的最慢一项是 ``Bootstrap``（RSA 模数生成），
+    它的耗时是随机的，不在这里估。
+    """
+    e_bits = max(n, 1) * (l + 1)
+    scale = (max(modulus_bits, 64) / 2048.0) ** 1.72
+    commit = 0.206 * e_bits * scale
+    if kind == "commit":
+        return commit
+    return 0.87 * max(nodes, 1) * commit
+
+
 def _require_session() -> VDSSession:
     if STATE.session is None:
         raise RuntimeError("还没有建立会话，请先调用 /api/setup")
@@ -105,6 +207,11 @@ def _timed(fn, *args, **kwargs) -> tuple[object, float]:
     t0 = time.perf_counter()
     out = fn(*args, **kwargs)
     return out, (time.perf_counter() - t0) * 1000.0
+
+
+def _progress_cb(done: int, total: int, detail: str) -> None:
+    """传给 ``VDSSession`` 的进度回调。"""
+    PROGRESS.tick(done, total, detail)
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +226,8 @@ def op_setup(payload: dict) -> dict:
     seed = payload.get("seed", "web-demo")
 
     STATE.reset()
+    PROGRESS.clear()
+    PROGRESS.begin("① 生成公开参数", 1, f"生成 {modulus_bits} 位隐藏阶群模数（耗时随机）")
     t0 = time.perf_counter()
     session = VDSSession(
         n_max=n_max,
@@ -128,6 +237,8 @@ def op_setup(payload: dict) -> dict:
         seed=str(seed).encode(),
     )
     ms = (time.perf_counter() - t0) * 1000.0
+    PROGRESS.tick(1, 1)
+    PROGRESS.finish()
     STATE.session = session
     STATE.block_bytes = block_bytes
 
@@ -159,8 +270,9 @@ def op_commit(payload: dict) -> dict:
     if not data:
         raise ValueError("内容不能为空")
 
+    PROGRESS.begin("② 切块并承诺", 3, "按块切分")
     (delta, crs_n, values, nbytes), ms = _timed(
-        session.commit_bytes, data, STATE.block_bytes
+        session.commit_bytes, data, STATE.block_bytes, progress=_progress_cb
     )
     STATE.delta, STATE.crs_n, STATE.values = delta, crs_n, values
     STATE.payload = data
@@ -168,6 +280,9 @@ def op_commit(payload: dict) -> dict:
     return {
         "ok": True,
         "ms": ms,
+        "eta_ms": estimate_ms(
+            delta.n, session.l, session.crs.N.bit_length(), kind="commit"
+        ),
         "n": delta.n,
         "nbytes": nbytes,
         "digest": {
@@ -203,8 +318,12 @@ def op_distribute(payload: dict) -> dict:
         groups.append(list(range(start, start + size)))
         start += size
 
+    PROGRESS.begin("③ 分发到服务器", len(groups), "逐台生成独立证据")
     nodes, ms = _timed(
-        session.distribute, STATE.delta, STATE.values, groups, crs_n=STATE.crs_n
+        session.distribute,
+        STATE.delta, STATE.values, groups,
+        crs_n=STATE.crs_n,
+        progress=_progress_cb,
     )
     STATE.nodes = nodes
     STATE.certs = []
@@ -214,6 +333,10 @@ def op_distribute(payload: dict) -> dict:
     return {
         "ok": True,
         "ms": ms,
+        "eta_ms": estimate_ms(
+            STATE.delta.n, session.l, session.crs.N.bit_length(),
+            nodes=len(nodes), kind="distribute",
+        ),
         "nodes": [
             {
                 "id": nd.node_id,
@@ -587,6 +710,9 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/"):
             if path == "/api/status":
                 self._send_json(op_status({}))
+            elif path == "/api/progress":
+                # 故意不取 STATE.lock：长任务霸着它，取了就轮询不到了
+                self._send_json({"ok": True, **PROGRESS.snapshot()})
             else:
                 self._send_json({"ok": False, "error": "该接口请用 POST"}, 405)
             return
@@ -626,6 +752,9 @@ class Handler(BaseHTTPRequestHandler):
                 },
                 400,
             )
+        finally:
+            # 无论成败都收尾，否则前端会看到一个永远「进行中」的阶段
+            PROGRESS.finish()
 
 
 def main() -> None:

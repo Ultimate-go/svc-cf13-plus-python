@@ -19,6 +19,7 @@ Applications to Verifiable Decentralized Storage*, **§5.2**。
 :mod:`svc.groups`       隐藏阶群生成（#9）
 :mod:`svc.primegen`     下标→素数映射（#10、#11）
 :mod:`svc.scheme`       方案中间量 + 本体 + 聚合拆分（#12~#26）
+:mod:`svc.fastopen`     §4.2 预处理提交与快速打开（``PPCom``/``FastOpen``）
 :mod:`svc.rng`          可复现随机源
 :mod:`svc.types`        数据结构
 ======================  ==================================================
@@ -74,6 +75,13 @@ from .mathbase import (
 )
 from .primegen import PrimeGen, PrimeGenHash, is_probable_prime_screened
 from .rng import DeterministicRNG
+from .fastopen import (
+    Precomputed,
+    blocks_of,
+    covering_blocks,
+    fast_open,
+    ppcom,
+)
 from .scheme import (
     DEFAULT_MODULUS_BITS,
     add_back,
@@ -159,6 +167,12 @@ __all__ = [
     "agg",
     "disagg_one_to_many",
     "agg_many_to_one",
+    # fastopen (§4.2)
+    "Precomputed",
+    "blocks_of",
+    "covering_blocks",
+    "ppcom",
+    "fast_open",
     # types
     "CRS",
     "CRSn",

@@ -48,27 +48,84 @@ __all__ = ["StorageNode", "UpdateWitness", "UpdateDelta"]
 
 
 class UpdateWitness:
-    """``Υ∆``：存储节点交给客户端的更新见证。"""
+    """``Υ∆`` —— 更新见证，充当「更新密钥」。
 
-    __slots__ = ("op", "K", "F_K", "S_K", "pi_K")
+    论文对三种 ``op`` 给的形态不同（``mod`` / ``del`` 是 ``(F_K, S_K)``，
+    ``add`` 只是 ``S_K``），这里统一成「一个群元素 + ``K`` 上的值 + 可选的 ``π_K``」。
 
-    def __init__(self, op: str, K=(), F_K=(), S_K: int | None = None, pi_K=None):
+    :param S_K: 更新密钥。``mod`` / ``del`` 取 :math:`g^{e_{[n]}/e_K}`，
+                一个群元素就够对方推出整批 :math:`S_i`（见 :func:`_membership_witnesses`）。
+                ``add`` 取**旧的累加器** :math:`U` —— 新位置在旧文件里没有成员见证，
+                而 :math:`g^{e_{[n']}/e_K} = g^{e_{[n]}}` 恰好就是 :math:`U`。
+    :param F_K: ``mod`` / ``add`` 是新值；``del`` 是被删部分的旧值。
+    :param pi_K: 只有 ``del`` 需要 —— 新摘要 :math:`\\delta'` 就是它。
+    """
+
+    __slots__ = ("op", "K", "S_K", "F_K", "pi_K")
+
+    def __init__(self, op, K=(), S_K=None, F_K=(), pi_K=None):
         self.op = op
         self.K = as_index_set(K)
-        self.F_K = tuple(F_K)
         self.S_K = S_K
+        self.F_K = tuple(F_K)
         self.pi_K = pi_K
+
+    def verify(
+        self, primegen, N: int, U_old: int
+    ) -> tuple[bool, str]:
+        """校验更新密钥，对应 ``ApplyUpdate`` 的第一步 ``b ← (S_K^{∏ e_j} = U)``。
+
+        三种 ``op`` 的右端项不同：
+
+        * ``mod`` / ``del``：:math:`S_K` 是 **K 在当前版本**上的成员见证，
+          所以 :math:`S_K^{e_K} = U`；
+        * ``add``：K 是**新**位置，它在旧文件里的见证就是旧的 :math:`U` 本身，
+          :math:`S_K^{e_K} = U^{e_K} = U'`。
+
+          论文 §8.2 把这一行也写成 ``= U``，与它自己前一行
+          ``U′ ← U^{∏_{i∈K} e_i}`` 矛盾（该节正文是从 §8.1 抄来的，
+          记号没改成 §5.2）。这里按代数上自洽的形式取 ``= U'``。
+
+        :returns: ``(b, 说明)``；``b`` 为假时说明写清了失败原因
+        """
+        if self.S_K is None:
+            return False, "Υ∆ 里没有更新密钥 S_K"
+        if not self.K:
+            return False, "Υ∆ 的 K 为空"
+
+        e_K = e_of(primegen, self.K)
+        lhs = pow(int(self.S_K), e_K, N)
+
+        if self.op == "add":
+            rhs, name = pow(int(U_old), e_K, N), "U′"
+        elif self.op in ("mod", "del"):
+            rhs, name = int(U_old), "U"
+        else:
+            return False, f"未知的 op {self.op!r}"
+
+        if lhs != rhs:
+            return False, (
+                f"Υ∆ 校验失败：S_K^(e_K) ≠ {name}。"
+                f"S_K 不是 K={list(self.K)} 在当前版本上的成员见证 —— "
+                f"可能是旧版本的见证，或者被伪造"
+            )
+        return True, ""
 
     def __repr__(self) -> str:  # pragma: no cover - 仅调试用
         return f"UpdateWitness(op={self.op!r}, K={list(self.K)})"
 
 
 class UpdateDelta:
-    """``∆``：一次更新操作的内容描述。"""
+    """``∆`` —— 一次更新操作的内容描述。
+
+    :param op: ``"mod"`` / ``"add"`` / ``"del"``
+    :param K: 被改动的下标
+    :param F_new: ``K`` 上的新值；``del`` 时为空
+    """
 
     __slots__ = ("op", "K", "F_new")
 
-    def __init__(self, op: str, K=(), F_new=()):
+    def __init__(self, op, K=(), F_new=()):
         self.op = op
         self.K = as_index_set(K)
         self.F_new = tuple(F_new)
@@ -204,7 +261,7 @@ class StorageNode:
         其中 ``J = I \\ K``。注意 :math:`S_I^{e_{I \\cap K}} = g^{e_{[n]}/e_I \\cdot e_{I\\cap K}}
         = g^{e_{[n]}/e_{I \\setminus K}} = S_{I \\setminus K}`，
         因为两种写法都把 :math:`I \\cap K` 那部分素数约掉了 ——
-        也就是说**丢掉一部分数据后，剩下的证据不需要重算**，拆一次就行。
+        即丢掉一部分数据后，剩下的证据不需要重算，拆一次就行。
 
         :returns: 一个新的 :class:`StorageNode`，只持有 ``I \\ K``
         """
@@ -261,6 +318,29 @@ class StorageNode:
     def has(self, Q: Sequence[int]) -> bool:
         """是否持有 ``Q`` 的全部下标。"""
         return self.view.has(Q)
+
+    # -------------------------------------------------------------------
+    # StrgNode.PoS-Prove / PoS-Aggregate（附录 D.1）
+    # -------------------------------------------------------------------
+
+    def pos_prove(self, challenge) -> "PoSProof":
+        """``StrgNode.PoS-Prove`` —— 回答存储证明挑战里落在本节点的那段。
+
+        只答 ``Q = I ∩ r``，不需要（也拿不到）别的节点的份额。
+        挑战没打到本节点时返回空证明。
+        """
+        from .pos import pos_prove
+
+        return pos_prove(self, challenge)
+
+    def pos_aggregate(self, challenge, left, right):
+        """``StrgNode.PoS-Aggregate`` —— 把两份部分证明合成一份。
+
+        :returns: ``(b, π_r)``；``b = 1`` 表示已覆盖整个挑战
+        """
+        from .pos import pos_aggregate
+
+        return pos_aggregate(self.crs_n(), challenge, left, right)
 
     # -------------------------------------------------------------------
     # StrgNode.CreateFrom —— 从大文件派生小文件
