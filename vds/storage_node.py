@@ -347,9 +347,22 @@ class StorageNode:
     # -------------------------------------------------------------------
 
     def create_from(self, J: Sequence[int]) -> tuple[Digest, "StorageNode"]:
-        r"""``StrgNode.CreateFrom`` —— 用手里的一部分数据「另立门户」（**未实现**）。
+        r"""``StrgNode.CreateFrom`` —— **属于 §8.1 的 ``VDS1``，不在本方案里**。
 
-        论文原文::
+        .. note::
+
+           这个算法**不属于 §8.2**。论文把它放在 §8.1 的 ``VDS1`` 里，
+           而它的存在依赖 §5.1 阴阳方案的代数结构 —— §5.2 把承诺压成了
+           单个群元素（这正是它参数更省的原因），也就失去了
+           ``PoKSubV`` 赖以存在的结构。所以这里不实现它，而是**指向真正
+           实现了它的地方**：
+
+           * :meth:`vds.vds1.StorageNode1.create_from`
+           * :meth:`vds.vds1.ClientNode1.get_create`
+
+           完整走一遍的演示：``python demo/vds1_create_from.py``。
+
+        论文原文（对照用）::
 
             δ′ ← VC.Com′(pp, F_J)          ← 对新子文件重新做一次承诺
             n′ ← |J|
@@ -358,18 +371,14 @@ class StorageNode:
 
         .. warning::
 
-           **本方法未实现，调用会直接报错**。理由有两层：
-
-           **第一层**：这个算法的意义**全部**在于那个 :math:`\Upsilon_J` ——
+           这个算法的意义**全部**在于那个 :math:`\Upsilon_J` ——
            它含一个子向量知识论证 :math:`\pi_{PoKSubV'}`，用来向客户端证明
            「我这个新摘要确实是从原文件的某个子向量切出来的，没有夹带私货」。
            若把 PoK 部分省掉，:math:`\delta'` 与 :math:`st'` 仍能算出来，
            但客户端**无从核实**，算法就失去了意义。
-           所以不能「先凑一个看起来能跑的版本」—— 那比缺失更糟。
 
-           **第二层（真正卡住的地方）**：``PoKSubV`` 是论文 **§6** 的协议，
-           而它**建立在 §5.1 的阴阳方案之上**，不是 §5.2。它依赖四样东西，
-           §5.2 一样都没有：
+           ``PoKSubV`` 是论文 **§6** 的协议，而它**建立在 §5.1 的阴阳方案之上**，
+           不是 §5.2。它依赖四样东西，§5.2 一样都没有：
 
            * CRS 里有**两个**生成元 :math:`(g_0, g_1)`（§5.2 只有一个 :math:`g`）
            * 承诺是**一对**累加器 :math:`C := (\{A,B\},\ \pi_{\text{prod}})`
@@ -385,16 +394,14 @@ class StorageNode:
            §5.2 把承诺压成单个群元素（这正是它参数更省的原因），
            代价就是**失去了 PoKSubV 赖以存在的代数结构**。
 
-           所以要做它，必须先把整个 §5.1 阴阳方案实现出来
-           （双生成元群、二元划分，以及 ``PoE`` / ``PoKE2`` / ``PoProd2`` 三个子协议）。
+           §5.1 与 §6 现在已经完整实现（``svc/yinyan.py`` 与 ``svc/pok.py``），
+           ``VDS1`` 也一并做好了，见 :mod:`vds.vds1`。
 
-           详见 ``docs/与论文对照.md`` 的「未实现部分」。
-
-           主流程（commit → 分发 → 检索 → 聚合 → 验证）**不受影响**：
-           它不需要跨越两个不同索引空间的承诺做绑定。
+           主流程（commit → 分发 → 检索 → 聚合 → 验证）本来就不依赖它。
         """
         raise NotImplementedError(
-            "StrgNode.CreateFrom 未实现：它依赖论文 §6 的 PoKSubV 协议，"
-            "而 PoKSubV 建立在 §5.1 阴阳方案之上（双生成元 CRS、承诺是一对累加器），"
-            "§5.2 不具备该代数结构。主流程（检索—聚合—验证）不依赖它，可正常使用。"
+            "StrgNode.CreateFrom 属于论文 §8.1 的 VDS1，不在 §8.2 的 VDS2 里。"
+            "请改用 vds.vds1.StorageNode1.create_from —— 它配合 "
+            "vds.vds1.ClientNode1.get_create / PoKSubV' 一起用。"
+            "参见 demo/vds1_create_from.py。"
         )

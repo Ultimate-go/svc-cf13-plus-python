@@ -172,7 +172,7 @@ class ClientNode:
     # -------------------------------------------------------------------
 
     def get_create(self, J, Upsilon_J=None):
-        r"""``ClntNode.GetCreate`` —— 核查一个「派生摘要」是否可信。
+        r"""``ClntNode.GetCreate`` —— **属于 §8.1 的 ``VDS1``，不在本方案里**。
 
         论文原文::
 
@@ -181,19 +181,23 @@ class ClientNode:
                 Output b ← PoKSubV′.V(pp, (δ, δ′, J), π_J)
                             ∧ J = {1, ..., |J|} ∧ δ′
 
-        .. warning::
+        .. note::
 
-           **本方法未实现**。它依赖论文 §6 的子向量知识论证 ``PoKSubV``，
-           而 ``PoKSubV`` **建立在 §5.1 阴阳方案之上**（CRS 有两个生成元
-           :math:`g_0,g_1`、承诺是一对累加器 :math:`(\{A,B\},\pi_{\text{prod}})`、
-           依赖二元划分 :math:`\mathsf{PartndPrimeProd}`）——
-           这些代数结构 §5.2 都没有，所以无法在本项目中实现。
+           它依赖论文 §6 的子向量知识论证 ``PoKSubV``，而 ``PoKSubV``
+           **建立在 §5.1 阴阳方案之上**（CRS 有两个生成元
+           :math:`g_0,g_1`、承诺是一对累加器、依赖二元划分
+           :math:`\mathsf{PartndPrimeProd}`）。
+           §5.2 把承诺压成单个群元素（这正是它参数更省的原因），
+           也就失去了这套代数结构。
 
-           详见 ``docs/与论文对照.md`` 的「未实现部分」。
+           §5.1 与 §6 现在已经完整实现（``svc/yinyan.py`` 与 ``svc/pok.py``）。
+           对应的 ``GetCreate`` 在 :meth:`vds.vds1.ClientNode1.get_create`，
+           配套的派生端在 :meth:`vds.vds1.StorageNode1.create_from`。
+           完整走一遍：``python demo/vds1_create_from.py``。
         """
         raise NotImplementedError(
-            "ClntNode.GetCreate 未实现：它依赖论文 §6 的 PoKSubV 协议，"
-            "而 PoKSubV 建立在 §5.1 阴阳方案之上，§5.2 不具备所需的代数结构。"
-            "该协议用于跨文件证明『派生出的新摘要确实来自原文件的某个子向量』，"
-            "不影响『检索—聚合—验证』主流程。"
+            "ClntNode.GetCreate 属于论文 §8.1 的 VDS1，不在 §8.2 的 VDS2 里。"
+            "请改用 vds.vds1.ClientNode1.get_create；"
+            "配套的派生端是 vds.vds1.StorageNode1.create_from。"
+            "参见 demo/vds1_create_from.py。"
         )

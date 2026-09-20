@@ -20,6 +20,8 @@ Applications to Verifiable Decentralized Storage*, **§5.2**。
 :mod:`svc.primegen`     下标→素数映射（#10、#11）
 :mod:`svc.scheme`       方案中间量 + 本体 + 聚合拆分（#12~#26）
 :mod:`svc.fastopen`     §4.2 预处理提交与快速打开（``PPCom``/``FastOpen``）
+:mod:`svc.yinyan`       §5.1 阴阳方案（双累加器 SVC）
+:mod:`svc.pok`          §6 知识论证（``PoProd2``/``PoProd*``/``PoKOpen``/``PoKSubV``）
 :mod:`svc.rng`          可复现随机源
 :mod:`svc.types`        数据结构
 ======================  ==================================================
@@ -46,6 +48,15 @@ Applications to Verifiable Decentralized Storage*, **§5.2**。
    ``open_subvector`` 就是清单 #21 里的 ``open``。
    因为 ``open`` 是 Python 内置函数，包顶层不用这个名字导出，
    但 ``svc.scheme.open(...)`` 这个别名依然可用。
+
+.. note::
+
+   §5.1 与 §6 的两套接口**不在包顶层导出** ——
+   它们的 ``setup`` / ``commit`` / ``verify`` 与 §5.2 同名但含义不同，
+   混在一起会让人分不清用的是哪一套。需要时请显式引入：
+   ``from svc.yinyan import setup1, commit1, ver1``、
+   ``from svc.pok import poksubv_prove, poksubv_verify``。
+   依赖它们的 ``VDS1`` 在 :mod:`vds.vds1`。
 """
 
 from __future__ import annotations

@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>可验证分布式存储 · 第二个 SVC 方案演示</title>
+<title>可验证分布式存储 · 两套 VDS 方案演示（§5.2/§8.2 与 §5.1/§8.1）</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header>
-  <h1>可验证分布式存储 <span class="sub">VDS · 第二个 SVC 方案（论文 §5.2 / §8.2）</span></h1>
+  <h1>可验证分布式存储 <span class="sub">VDS · 两套方案（论文 §5.2 / §8.2）与（§5.1 / §8.1）</span></h1>
   <p class="lede">
     一个文件被切成若干块，存在不同的服务器上。任何人可以检索文件的若干部分，
     服务器返回<strong>内容</strong>与<strong>相应证据</strong>；
@@ -54,7 +54,11 @@
       <button id="btn-forge" class="danger">☠ 让服务器伪造证据</button>
       <button id="btn-reset">重置</button>
     </div>
-    <p class="hint" id="hint">提示：模数位长设小一点（512）能让演示快很多；真实安全强度需要 2048 位以上。</p>
+    <p class="hint" id="hint">
+      提示：<strong>真正的块数 = ⌈文件字节数 ÷ 每块字节数⌉</strong>，
+      「n max」只是素数表容量上限；「服务器台数」会被 <code>min(台数, 块数)</code> 截断。
+      模数位长设小一点（512）能让演示快很多；真实安全强度需要 2048 位以上。
+    </p>
   </section>
 
   <!-- ================= 进度 ================= -->
@@ -125,6 +129,29 @@
     </div>
   </section>
 
+  <!-- ================= §8.1 的 VDS1 ================= -->
+  <section class="panel">
+    <h2>5 · 另一套方案：§8.1 的 VDS1（能派生新文件）</h2>
+    <p class="hint">
+      上面整条流程是 <strong>§8.2 的 VDS2</strong>：承诺与打开各一个群元素，但
+      <strong>没有</strong>「从一个已存文件里派生出新文件」的能力。
+      <strong>§8.1 的 VDS1</strong> 多花一个群元素（承诺变成一对累加器
+      <code>(A, B)</code>），换来 <code>CreateFrom</code> / <code>GetCreate</code>：
+      只存了文件一部分的节点能派生出新文件，客户端只用一个<strong>常数大小</strong>的
+      <code>PoKSubV'</code> 证明就能核实「新摘要确实是原文件那一段」。
+    </p>
+    <p class="hint">
+      下面这个按钮会<strong>现场</strong>建一份独立的 VDS1 会话（与上面的状态无关），
+      跑完：Bootstrap → 提交 → 分发 → 检索聚合验证 → <strong>派生新文件</strong> →
+      <strong>mod / add / del</strong>（每步都给 <code>I ∩ K</code> 三种情形各造一个探测节点）
+      → 四类攻击。
+    </p>
+    <div class="actions">
+      <button id="btn-vds1" class="primary">▶ 跑一遍 VDS1</button>
+    </div>
+    <div class="mini" id="vds1-body" hidden>—</div>
+  </section>
+
   <!-- ================= 日志 ================= -->
   <section class="panel">
     <h2>执行日志</h2>
@@ -135,8 +162,9 @@
 <footer>
   <p>
     实现依据：ASIACRYPT 2020,
-    <em>Incrementally Aggregatable Vector Commitments and Applications to Verifiable Decentralized Storage</em>,
-    §5.2（第二个 SVC）与 §8.2（VDS2）。
+    <em>Incrementally Aggregatable Vector Commitments and Applications to Verifiable Decentralized Storage</em>，
+    §5.2 + §8.2（VDS2，上面的主流程）、§5.1 + §6 + §8.1（VDS1，第 5 节）、
+    附录 D.1（存储证明）。
     纯 Python、零第三方依赖，测试见 <code>tests/</code>。
   </p>
 </footer>

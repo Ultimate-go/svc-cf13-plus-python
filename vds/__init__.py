@@ -25,6 +25,7 @@
 :mod:`vds.updates`             §8.2 的两段式更新（``PushUpdate``/``ApplyUpdate``）
 :mod:`vds.pos`                 附录 D.1 的存储证明（PoR / PDP）
 :mod:`vds.vds`                 :class:`~vds.vds.VDSSession`，组装全流程
+:mod:`vds.vds1`                §8.1 的 ``VDS1``（含 ``CreateFrom``/``GetCreate``）
 ============================  ==========================================
 
 最小用法
@@ -46,19 +47,21 @@
 
 已实现的范围
 ------------
-* §7 / §8.2 的全部接口，除了下面两项；
+* §7 / §8.2 的全部接口；
 * §8.2 的三种文件更新（``mod`` / ``add`` / ``del``）走**两段式**：
   :func:`push_update` 产出 :math:`\\Upsilon_\\Delta`，:func:`apply_update`
   先校验它再应用 —— 后者**不需要改动后的内容**；
-* 附录 D.1 的存储证明（PoR / PDP）见 :mod:`vds.pos`。
+* 附录 D.1 的存储证明（PoR / PDP）见 :mod:`vds.pos`；
+* §8.1 的 ``VDS1`` 见 :mod:`vds.vds1`，包括 ``StrgNode.CreateFrom`` /
+  ``ClntNode.GetCreate``（从一个已存文件派生新文件，客户端只需一个
+  常数大小的 ``PoKSubV'`` 证明）。它建立在 §5.1 阴阳方案 + §6 的
+  知识论证之上，是**另一套**方案，与 :mod:`vds.vds` 的 ``VDS2`` 并列。
 
-未实现的部分
-------------
-``StrgNode.CreateFrom`` 与 ``ClntNode.GetCreate`` **未实现**。
-它们依赖论文 §6 的 ``PoKSubV``，而 §6 是建在 **§5.1 阴阳方案**上的
-（双生成元 CRS、承诺为一对累加器、二元划分 ``PartndPrimeProd``），
-§5.2 不具备这些代数结构。主流程与 PoS 都不受影响。
-详见 ``docs/与论文对照.md``。
+两套 VDS 怎么选
+---------------
+``VDS2``（本模块）承诺与打开各**一个**群元素，但**没有**派生新文件的能力。
+``VDS1``（:mod:`vds.vds1`）各**两个**群元素，换来 ``CreateFrom`` /
+``GetCreate``，以及不需要 ``VC.Specialize``。论文 §8.3 有对比。
 """
 
 from __future__ import annotations
@@ -94,6 +97,24 @@ from .pos import (
     pos_ver,
 )
 from .vds import VDSSession
+from .vds1 import (
+    AppliedUpdate1,
+    ClientNode1,
+    CreateWitness,
+    Digest1,
+    LocalView1,
+    PushedUpdate1,
+    StorageNode1,
+    UpdateOp1,
+    VDS1Session,
+    agg_prime,
+    com_prime,
+    disagg_prime,
+    is_prefix,
+    poksubv_prime_prove,
+    poksubv_prime_verify,
+    ver_prime,
+)
 
 __all__ = [
     "VDSSession",
@@ -126,4 +147,21 @@ __all__ = [
     "join_blocks",
     "blocks_for_length",
     "l_for_block_bytes",
+    # §8.1 的 VDS1
+    "VDS1Session",
+    "Digest1",
+    "LocalView1",
+    "StorageNode1",
+    "ClientNode1",
+    "CreateWitness",
+    "UpdateOp1",
+    "PushedUpdate1",
+    "AppliedUpdate1",
+    "com_prime",
+    "ver_prime",
+    "disagg_prime",
+    "agg_prime",
+    "is_prefix",
+    "poksubv_prime_prove",
+    "poksubv_prime_verify",
 ]
