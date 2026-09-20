@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "python-svc-v1"
+version = "1.0.0"
+description = "第二个 SVC 方案（ASIACRYPT 2020, §5.2）与可验证分布式存储（§8.2）的纯 Python 实现"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+# 只给 Web 演示用；核心算法零依赖
+web = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
+dev = ["pytest>=8"]
+
+[tool.setuptools]
+packages = ["svc", "vds"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-q --tb=short"
+filterwarnings = [
+    "error::SyntaxWarning",
+]
