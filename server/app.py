@@ -27,6 +27,7 @@
 ``/api/attack``     制造攻击（篡改内容 / 伪造证据）
 ``/api/full``       一键跑完整条流水线
 ``/api/status``     查看当前状态
+``/api/vds1``       另跑一遍 §8.1 的 ``VDS1``（派生新文件 / 三种更新 / 攻击）
 ==================  ==================================================
 
 .. warning::
@@ -95,6 +96,108 @@ class DemoState:
 STATE = DemoState()
 
 
+# ---------------------------------------------------------------------------
+# 进度
+# ---------------------------------------------------------------------------
+
+class Progress:
+    """粗粒度的阶段进度，供前端在长任务期间轮询。
+
+    单独一把锁：业务状态那把锁在整个请求期间都被占着，
+    轮询接口不能去等它，否则进度查询会被长任务饿死。
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._reset()
+
+    def _reset(self) -> None:
+        self._running = False
+        self._phase = ""
+        self._done = 0
+        self._total = 0
+        self._detail = ""
+        self._t0 = 0.0
+        self._elapsed_ms = 0.0
+        self._history: list[dict] = []
+
+    def clear(self) -> None:
+        with self._lock:
+            self._reset()
+
+    def begin(self, phase: str, total: int = 0, detail: str = "") -> None:
+        with self._lock:
+            self._running = True
+            self._phase = phase
+            self._done, self._total = 0, total
+            self._detail = detail
+            self._t0 = time.perf_counter()
+
+    def tick(self, done: int, total: int | None = None, detail: str | None = None) -> None:
+        with self._lock:
+            self._done = done
+            if total is not None:
+                self._total = total
+            if detail is not None:
+                self._detail = detail
+
+    def finish(self) -> None:
+        """结束当前阶段。**幂等** —— 成功、失败、异常路径都该调它。"""
+        with self._lock:
+            if not self._running:
+                return
+            self._elapsed_ms = (time.perf_counter() - self._t0) * 1000.0
+            self._history.append({"phase": self._phase, "ms": round(self._elapsed_ms, 1)})
+            self._running = False
+            self._done = self._total or self._done
+            self._detail = ""
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            elapsed = self._elapsed_ms
+            if self._running:
+                elapsed = (time.perf_counter() - self._t0) * 1000.0
+            return {
+                "running": self._running,
+                "phase": self._phase,
+                "done": self._done,
+                "total": self._total,
+                "detail": self._detail,
+                "elapsed_ms": elapsed,
+                "history": list(self._history),
+            }
+
+
+PROGRESS = Progress()
+
+
+def estimate_ms(
+    n: int, l: int, modulus_bits: int, *, nodes: int = 0, kind: str = "commit"
+) -> float:
+    """按实测拟合的代价模型粗估耗时（毫秒），只作为前端「预计」的参考。
+
+    主因是 ``e_[n]`` 的位长 ``E = n·(l+1)``（模幂的指数长度），
+    模数按约 ``|N|^1.72`` 放大。实测标定点：
+
+    ====================  =================================  ==========
+    配置                   阶段                                 耗时
+    ====================  =================================  ==========
+    |N|=2048, n=1024, l=128  commit                              27.0 s
+    |N|=4096, n=512,  l=128  commit                              49.1 s
+    |N|=4096, n=512,  l=128  distribute（8 台）                 378.9 s
+    ====================  =================================  ==========
+
+    没有覆盖到的最慢一项是 ``Bootstrap``（RSA 模数生成），
+    它的耗时是随机的，不在这里估。
+    """
+    e_bits = max(n, 1) * (l + 1)
+    scale = (max(modulus_bits, 64) / 2048.0) ** 1.72
+    commit = 0.206 * e_bits * scale
+    if kind == "commit":
+        return commit
+    return 0.87 * max(nodes, 1) * commit
+
+
 def _require_session() -> VDSSession:
     if STATE.session is None:
         raise RuntimeError("还没有建立会话，请先调用 /api/setup")
@@ -105,6 +208,11 @@ def _timed(fn, *args, **kwargs) -> tuple[object, float]:
     t0 = time.perf_counter()
     out = fn(*args, **kwargs)
     return out, (time.perf_counter() - t0) * 1000.0
+
+
+def _progress_cb(done: int, total: int, detail: str) -> None:
+    """传给 ``VDSSession`` 的进度回调。"""
+    PROGRESS.tick(done, total, detail)
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +227,8 @@ def op_setup(payload: dict) -> dict:
     seed = payload.get("seed", "web-demo")
 
     STATE.reset()
+    PROGRESS.clear()
+    PROGRESS.begin("① 生成公开参数", 1, f"生成 {modulus_bits} 位隐藏阶群模数（耗时随机）")
     t0 = time.perf_counter()
     session = VDSSession(
         n_max=n_max,
@@ -128,6 +238,8 @@ def op_setup(payload: dict) -> dict:
         seed=str(seed).encode(),
     )
     ms = (time.perf_counter() - t0) * 1000.0
+    PROGRESS.tick(1, 1)
+    PROGRESS.finish()
     STATE.session = session
     STATE.block_bytes = block_bytes
 
@@ -159,8 +271,9 @@ def op_commit(payload: dict) -> dict:
     if not data:
         raise ValueError("内容不能为空")
 
+    PROGRESS.begin("② 切块并承诺", 3, "按块切分")
     (delta, crs_n, values, nbytes), ms = _timed(
-        session.commit_bytes, data, STATE.block_bytes
+        session.commit_bytes, data, STATE.block_bytes, progress=_progress_cb
     )
     STATE.delta, STATE.crs_n, STATE.values = delta, crs_n, values
     STATE.payload = data
@@ -168,6 +281,9 @@ def op_commit(payload: dict) -> dict:
     return {
         "ok": True,
         "ms": ms,
+        "eta_ms": estimate_ms(
+            delta.n, session.l, session.crs.N.bit_length(), kind="commit"
+        ),
         "n": delta.n,
         "nbytes": nbytes,
         "digest": {
@@ -191,10 +307,10 @@ def op_distribute(payload: dict) -> dict:
     if STATE.delta is None:
         raise ValueError("请先调用 /api/commit")
 
-    k = int(payload.get("nodes", 4))
+    requested = int(payload.get("nodes", 4))
     n = STATE.delta.n
-    # 均分成 k 组；n 不足 k 时按 n 组
-    k = max(1, min(k, n))
+    # 均分成 k 组；n 不足 k 时按 n 组（空服务器没有意义）
+    k = max(1, min(requested, n))
     base = n // k
     extra = n % k
     groups, start = [], 0
@@ -203,8 +319,12 @@ def op_distribute(payload: dict) -> dict:
         groups.append(list(range(start, start + size)))
         start += size
 
+    PROGRESS.begin("③ 分发到服务器", len(groups), "逐台生成独立证据")
     nodes, ms = _timed(
-        session.distribute, STATE.delta, STATE.values, groups, crs_n=STATE.crs_n
+        session.distribute,
+        STATE.delta, STATE.values, groups,
+        crs_n=STATE.crs_n,
+        progress=_progress_cb,
     )
     STATE.nodes = nodes
     STATE.certs = []
@@ -214,6 +334,13 @@ def op_distribute(payload: dict) -> dict:
     return {
         "ok": True,
         "ms": ms,
+        "requested_nodes": requested,
+        "nodes_clamped": requested > n,
+        "n": n,
+        "eta_ms": estimate_ms(
+            STATE.delta.n, session.l, session.crs.N.bit_length(),
+            nodes=len(nodes), kind="distribute",
+        ),
         "nodes": [
             {
                 "id": nd.node_id,
@@ -522,6 +649,339 @@ def op_status(_: dict) -> dict:
     }
 
 
+def op_vds1(payload: dict) -> dict:
+    """跑一遍 §8.1 的 ``VDS1``：分发 → 检索 → 派生新文件 → 三种更新 → 攻击。
+
+    这套与 §8.2 的 ``VDS2`` **完全独立**：另一份 CRS、另一套摘要
+    （一对累加器 ``(A, B)``）、另一套打开证明 ``(Γ_I, Δ_I)``。
+    它多出来的能力是 :meth:`~vds.vds1.StorageNode1.create_from` ——
+    只存了文件一部分的节点能派生出**一个新文件**，
+    客户端只用一个**常数大小**的 ``PoKSubV'`` 证明就能核实。
+
+    本接口**无状态**：每次调用都现场生成 CRS、现场走完整流程，不碰 :data:`STATE`。
+    唯一的副作用是往 :data:`PROGRESS` 里推进度，供前端轮询。
+    """
+    from vds.vds1 import (
+        ClientNode1,
+        CreateWitness,
+        LocalView1,
+        PushedUpdate1,
+        StorageNode1,
+        UpdateOp1,
+        VDS1Session,
+        com_prime,
+    )
+    from svc.yinyan import Opening1
+
+    t_all = time.time()
+    text = str(payload.get("text") or "Hello VDS1")
+    n_max = max(8, min(64, int(payload.get("n_max", 24) or 24)))
+    mod_bits = max(64, min(1024, int(payload.get("modulus_bits", 512) or 512)))
+
+    raw = text.encode("utf-8")
+    total_bits = len(raw) * 8
+    # 后面要做 add，追加的下标是 {n, n+1}，所以给素数映射留两个位置
+    n = min(total_bits, max(4, n_max - 2))
+    vals = [int((raw[i // 8] >> (7 - (i % 8))) & 1) for i in range(n)]
+
+    steps: list[dict] = []
+    TOTAL_STEPS = 9
+    PROGRESS.begin("§8.1 VDS1", total=TOTAL_STEPS, detail="Bootstrap")
+    cursor = 0
+
+    def mark(name: str, detail: str, t0: float) -> None:
+        nonlocal cursor
+        cursor += 1
+        PROGRESS.tick(cursor, detail=name)
+        steps.append(
+            {
+                "step": name,
+                "ok": True,
+                "detail": detail,
+                "ms": round((time.time() - t0) * 1000, 1),
+            }
+        )
+
+    def sub(base: StorageNode1, I, node_id: str) -> StorageNode1:
+        """从 ``base``（持有全集）拆出一个只持有 ``I`` 的节点。"""
+        keep = list(I)
+        drop = [i for i in base.I if i not in set(keep)]
+        node = base.rmv_storage(drop) if drop else base
+        return StorageNode1(node_id, base.session, node.view)
+
+    # ---------------------------------------------------------------- ①
+    t = time.time()
+    session = VDS1Session(
+        n_max=n_max, k=1, lambda_bits=128, modulus_bits=mod_bits, seed=b"web-vds1"
+    )
+    delta0, _st0 = session.bootstrap()
+    mark(
+        "① Bootstrap：生成 pp 与空文件的 (δ₀, st₀)",
+        f"|N| = {session.crs.N.bit_length()} 位；δ₀ = ((g₀, g₁), 0)；"
+        f"与 VC.Com′([]) 一致：{com_prime(session.crs, []) == delta0}",
+        t,
+    )
+
+    # ---------------------------------------------------------------- ②
+    t = time.time()
+    delta, st_root = session.commit(vals)
+    root = StorageNode1(
+        "root", session, LocalView1(delta, st_root, list(range(n)), vals)
+    )
+    mark(
+        "② 提交文件：δ = ((A, B), n)",
+        f"取 {n} 位"
+        + ("（文本太长，已截断）" if total_bits > n else "")
+        + f"；根节点本地视图合法：{root.check_local_view()}",
+        t,
+    )
+
+    # ---------------------------------------------------------------- ③
+    cut1 = max(2, n // 3)
+    cut2 = max(cut1 + 1, (2 * n) // 3)
+    groups = [
+        ("S1", list(range(0, cut1))),
+        ("S2", list(range(cut1, cut2))),
+        ("S3", list(range(cut2, n))),
+    ]
+    t = time.time()
+    nodes = {name: sub(root, I, name) for name, I in groups if I}
+    mark(
+        "③ 分发：每个节点只拿自己那段 + 两个群元素的证据",
+        "；".join(f"{k} 持 {len(v.I)} 位" for k, v in nodes.items()),
+        t,
+    )
+
+    # ---------------------------------------------------------------- ④
+    t = time.time()
+    client = ClientNode1("client", session, delta)
+    certs = []
+    detail = []
+    for name, nd in nodes.items():
+        Q = list(nd.I[:2]) or list(nd.I)
+        F_Q, pi_Q = nd.retrieve(Q)
+        ok = client.ver_retrieve(Q, F_Q, pi_Q)
+        certs.append((Q, F_Q, pi_Q))
+        detail.append(f"{name} 返回 {len(Q)} 位 → {ok}")
+    merged = client.aggregate_certificates(certs)
+    allQ = sorted({i for q, _, _ in certs for i in q})
+    ok_merged = client.ver_retrieve(allQ, [vals[i] for i in allQ], merged)
+    mark(
+        "④ 检索 → 聚合 → 验证",
+        "；".join(detail)
+        + f"；{len(certs)} 份合并成 1 份（{len(merged.Gamma)} 个群元素），"
+        + f"验证覆盖 {len(allQ)} 位 → {ok_merged}",
+        t,
+    )
+
+    # ---------------------------------------------------------------- ⑤
+    t = time.time()
+    m = max(1, min(len(nodes["S1"].I), n // 3))
+    J = list(range(m))
+    derived, upsilon = nodes["S1"].create_from(J)
+    ok_get, delta_p = client.get_create(J, upsilon)
+    forged_delta = com_prime(session.crs, vals[1 : m + 1])
+    ok_forged = client.get_create(
+        J, CreateWitness(delta=forged_delta, proof=upsilon.proof)
+    )[0]
+    # [1, 2] 永远不是前缀，所以这是稳定的反例
+    ok_nonprefix = client.get_create([1, 2], upsilon)[0]
+    create = {
+        "m": m,
+        "J": J,
+        "delta_A": DemoState.num(upsilon.delta.A),
+        "delta_B": DemoState.num(upsilon.delta.B),
+        "matches": upsilon.delta == com_prime(session.crs, vals[:m]),
+        "derived_indices": list(derived.I),
+        "derived_valid": derived.check_local_view(),
+        "accepted": bool(ok_get),
+        "forged_rejected": not bool(ok_forged),
+        "nonprefix_rejected": not bool(ok_nonprefix),
+    }
+    mark(
+        "⑤ CreateFrom / GetCreate：从已存文件派生新文件",
+        f"节点 S1 派生前 {m} 位 → δ′ == Com′(F_J) ？{create['matches']}；"
+        f"客户端接受：{bool(ok_get)}；伪造 δ′ 被拒：{create['forged_rejected']}；"
+        f"非前缀 J 被拒：{create['nonprefix_rejected']}；"
+        f"派生节点视图合法：{create['derived_valid']}",
+        t,
+    )
+
+    # ---------------------------------------------------------------- ⑥⑦⑧
+    updates = []
+
+    def probe_nodes(cur_root: StorageNode1, K, n_cur: int) -> dict:
+        """造几个探测节点，分别落在 ``I ∩ K`` 的几种情形上。
+
+        ``K`` 里不在本节点持有范围内的下标会被剔掉 ——
+        ``add`` 就是这种情况：新位置 ``{n, n+1}`` 谁都还没有，
+        所以只能落在 ``I ∩ K = ∅`` 这一支。
+        """
+        held = set(cur_root.I)
+        K = [i for i in K if i in held]
+        inside = list(K)
+        outside = [i for i in range(n_cur) if i not in set(K) and i in held]
+        probes: dict[str, StorageNode1] = {}
+        if inside:
+            probes["I∩K=K"] = sub(cur_root, inside, "p-over")
+        if outside:
+            probes["I∩K=∅"] = sub(
+                cur_root, outside[: max(2, len(outside) // 2)], "p-disj"
+            )
+        if inside and outside:
+            probes["I∩K=L"] = sub(cur_root, sorted([inside[0]] + outside[:2]), "p-part")
+        return probes
+
+    state = {"root": root, "vals": list(vals), "client": client}
+
+    def run_update(op: UpdateOp1, label: str, expected: list[int]) -> None:
+        t0 = time.time()
+        pushed = state["root"].push_update(op)
+        probes = probe_nodes(state["root"], list(op.K), len(state["vals"]))
+        applied = []
+        for kind, nd in probes.items():
+            res = nd.apply_update(op, pushed)
+            valid = False
+            idx_after = list(nd.I)
+            if res.ok:
+                idx_after = list(res.J)
+                valid = StorageNode1(
+                    kind, session,
+                    LocalView1(res.delta, res.st, res.J, res.F_J),
+                ).check_local_view()
+            applied.append(
+                {"kind": kind, "ok": res.ok, "valid": valid, "indices": idx_after}
+            )
+
+        ok_client, delta_c = state["client"].apply_update(op, pushed)
+        updates.append(
+            {
+                "op": label,
+                "K": list(op.K),
+                "n": pushed.delta.n,
+                "matches": pushed.delta == com_prime(session.crs, expected),
+                "client_ok": bool(ok_client),
+                "applied": applied,
+            }
+        )
+        mark(
+            label,
+            f"K = {list(op.K)} → n = {pushed.delta.n}；"
+            f"δ′ == 重新承诺整个文件 ？{updates[-1]['matches']}；"
+            + "；".join(
+                f"{a['kind']} 接受={a['ok']}" for a in applied
+            ),
+            t0,
+        )
+        state["root"] = StorageNode1(
+            "root", session,
+            LocalView1(pushed.delta, pushed.st, pushed.J, pushed.F_J),
+        )
+        state["vals"] = list(expected)
+        state["client"] = ClientNode1("client", session, delta_c)
+        return pushed
+
+    K_mod = sorted({max(0, n // 2 - 1), min(n - 1, n // 2)})
+    F_mod = [vals[i] ^ 1 for i in K_mod]
+    exp_mod = list(vals)
+    for pos, i in enumerate(K_mod):
+        exp_mod[i] = F_mod[pos]
+    op_mod = UpdateOp1("mod", K_mod, F_mod)
+    pushed_mod = run_update(op_mod, "⑥ mod：改值（三种 I∩K 情形各造一个探测节点）", exp_mod)
+    n_mod = len(exp_mod)
+
+    op_add = UpdateOp1("add", [n_mod, n_mod + 1], [1, 0])
+    exp_add = exp_mod + [1, 0]
+    pushed_add = run_update(op_add, "⑦ add：在文件尾部追加两位", exp_add)
+
+    op_del = UpdateOp1("del", [n_mod, n_mod + 1])
+    pushed_del = run_update(op_del, "⑧ del：把刚追加的两位删掉", exp_mod)
+
+    # ---------------------------------------------------------------- ⑨
+    t = time.time()
+    attacks = []
+
+    flipped = PushedUpdate1(
+        delta=pushed_mod.delta,
+        st=pushed_mod.st,
+        J=pushed_mod.J,
+        F_J=pushed_mod.F_J,
+        F_K=(pushed_mod.F_K[0] ^ 1, *pushed_mod.F_K[1:]),
+        pi_K=pushed_mod.pi_K,
+    )
+    victim = sub(state["root"], K_mod, "victim")
+    attacks.append(
+        {
+            "what": "伪造 Υ_∆ 里的旧值",
+            "how": "把 F_K 的一位翻过来（改变零集合，旧证据就对不上了）",
+            "rejected": not victim.apply_update(op_mod, flipped).ok,
+        }
+    )
+    attacks.append(
+        {
+            "what": "重放 mod 的 Υ_∆",
+            "how": "拿同一份 π_K 打到已经更新过的摘要上",
+            "rejected": not state["client"].apply_update(op_mod, pushed_mod)[0],
+        }
+    )
+    stale = ClientNode1("stale", session, delta)
+    attacks.append(
+        {
+            "what": "在陈旧摘要上做 del",
+            "how": f"客户端还停在 n = {delta.n}，却想删掉末尾两位",
+            "rejected": not stale.apply_update(op_del, pushed_del)[0],
+        }
+    )
+    F_Q, pi_Q = state["root"].retrieve(allQ)
+    tampered = Opening1(
+        (pi_Q.Gamma[0] * 3 % session.crs.N,), pi_Q.Delta, pi_Q.I
+    )
+    attacks.append(
+        {
+            "what": "篡改检索证据",
+            "how": "把 Γ_Q 乘 3",
+            "rejected": not state["client"].ver_retrieve(
+                allQ, [state["vals"][i] for i in allQ], tampered
+            ),
+        }
+    )
+
+    mark(
+        "⑨ 攻击面：四类伪造全部被拒",
+        f"{sum(1 for a in attacks if a['rejected'])}/{len(attacks)} 被拒",
+        t,
+    )
+
+    PROGRESS.finish()
+    return {
+        "ok": all(s["ok"] for s in steps),
+        "steps": steps,
+        "pp": {
+            "n_max": n_max,
+            "N_bits": session.crs.N.bit_length(),
+            "k": 1,
+        },
+        "file": {
+            "n": n,
+            "bits": "".join(str(v) for v in vals),
+            "truncated": total_bits > n,
+        },
+        "digest": {
+            "A": DemoState.num(delta.A),
+            "B": DemoState.num(delta.B),
+            "n": delta.n,
+        },
+        "nodes": [
+            {"id": k, "indices": list(v.I), "valid": v.check_local_view()}
+            for k, v in nodes.items()
+        ],
+        "create": create,
+        "updates": updates,
+        "attacks": attacks,
+        "ms": round((time.time() - t_all) * 1000, 1),
+    }
+
+
 ROUTES = {
     "/api/setup": op_setup,
     "/api/commit": op_commit,
@@ -532,6 +992,7 @@ ROUTES = {
     "/api/attack": op_attack,
     "/api/full": op_full,
     "/api/status": op_status,
+    "/api/vds1": op_vds1,
 }
 
 
@@ -574,6 +1035,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", _MIME.get(path.suffix, "application/octet-stream"))
         self.send_header("Content-Length", str(len(body)))
+        # 演示时改完 js/css 刷新就该生效 —— 不加这个浏览器会启发式缓存旧文件
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
@@ -587,6 +1050,9 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/"):
             if path == "/api/status":
                 self._send_json(op_status({}))
+            elif path == "/api/progress":
+                # 故意不取 STATE.lock：长任务霸着它，取了就轮询不到了
+                self._send_json({"ok": True, **PROGRESS.snapshot()})
             else:
                 self._send_json({"ok": False, "error": "该接口请用 POST"}, 405)
             return
@@ -626,6 +1092,9 @@ class Handler(BaseHTTPRequestHandler):
                 },
                 400,
             )
+        finally:
+            # 无论成败都收尾，否则前端会看到一个永远「进行中」的阶段
+            PROGRESS.finish()
 
 
 def main() -> None:

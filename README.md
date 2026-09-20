@@ -19,6 +19,8 @@
 | **常量摘要** | 客户端只保存 `δ = ((U, C), n)` —— 两个群元素 + 一个整数，与文件大小无关 |
 | **常量证据** | 一次打开的证据是 `π_I = (S_I, Λ_I)` —— 两个群元素，与打开多少块无关 |
 | **增量聚合** | 从多台服务器拿到的多份证据能合成**一个**；合并结果仍是合法证明，可无限次继续合并 |
+| **存储证明** | 不下载任何内容，也能确认全网确实还存着文件（附录 D.1 的 PoR/PDP） |
+| **可验证更新** | 增删改走两段式：持有改动内容的一方产出更新密钥 `Υ∆`，其他节点**无需该内容**就能校验并跟上 |
 
 验证代价与块数、文件长度**无关**：客户端拿到聚合后的那一个证据，
 用自己手里的摘要一次校验就完事。
@@ -47,6 +49,10 @@ python server/app.py            # 打开 http://127.0.0.1:8000
 看到摘要、每台服务器的状态、检索到的多份证据、聚合后的唯一证据、验证结果；
 还能点「让服务器篡改内容 / 伪造证据」看攻击在哪一步被抓住。
 
+所有群元素（U、C、S<sub>I</sub>、Λ<sub>I</sub>）默认只显示 4 字节指纹，
+**点一下就能展开完整的十六进制值**（512 位的模数 = 130 个字符）；
+也可以点「⤢ 展开全部完整值」一次看全部，或点旁边的 `⧉` 复制。
+
 > 演示建议把 **模数位长设成 512**，速度差两个数量级。
 > 512 位只够跑通代数关系，**没有任何安全强度**；真实部署需要 2048 位以上。
 
@@ -61,20 +67,27 @@ python_SVC_v1/
 │  ├─ groups.py            隐藏阶群生成（#9）
 │  ├─ primegen.py          下标→素数映射（#10、#11）
 │  ├─ scheme.py            中间量 + 本体 + 聚合拆分（#12~#26）
+│  ├─ fastopen.py          §4.2 预处理提交与快速打开（PPCom / FastOpen）
+│  ├─ yinyan.py            §5.1 阴阳方案（双累加器 SVC）
+│  ├─ pok.py               §6 知识论证（PoProd2 / PoProd* / PoKOpen / PoKSubV / PoKComSub）
 │  ├─ rng.py               可复现随机源
 │  └─ types.py             数据结构
-├─ vds/                    ★ 可验证分布式存储（论文 §8.2）
-│  ├─ digest.py            摘要 δ 与本地视图
+├─ vds/                    ★ 可验证分布式存储
+│  ├─ digest.py            摘要 δ 与本地视图（§8.2）
 │  ├─ encoding.py          文件 ↔ 块
-│  ├─ storage_node.py      StrgNode.*（AddStorage / RmvStorage / Retrieve）
-│  ├─ client_node.py       ClntNode.*（AggregateCertificates / VerRetrieve）
-│  ├─ updates.py           文件增删改（PushUpdate / ApplyUpdate）
-│  └─ vds.py               VDSSession，串起全流程
+│  ├─ storage_node.py      StrgNode.*（AddStorage / RmvStorage / Retrieve / PoS-Prove）
+│  ├─ client_node.py       ClntNode.*（AggregateCertificates / VerRetrieve / PoS-Ver）
+│  ├─ updates.py           两段式更新（PushUpdate / ApplyUpdate）
+│  ├─ pos.py               附录 D.1 存储证明（PoS / 并行 PoS）
+│  ├─ vds.py               VDSSession，串起 §8.2 的全流程
+│  └─ vds1.py              ★ §8.1 的 VDS1（含 CreateFrom / GetCreate）
 ├─ server/app.py           零依赖演示后端（标准库 http.server）
 ├─ web/                    前端页面（原生 HTML/CSS/JS，无构建步骤）
-├─ tests/                  232 个测试
-├─ demo/end_to_end.py      命令行端到端演示
+├─ tests/                  509 个测试
+├─ demo/end_to_end.py      §8.2 命令行端到端演示
+├─ demo/vds1_create_from.py §8.1 命令行端到端演示（派生子文件 / 三种更新）
 ├─ bench/bench_scale.py    规模与性能测试
+├─ tools/fix_md_math.py    维护脚本：把文档里的 LaTeX 换成 Unicode
 └─ docs/                   设计说明与论文对照
 ```
 
@@ -212,7 +225,7 @@ assert 真聚合的结果 == 对新集合从零算一遍的结果
 ## 测试
 
 ```
-232 passed
+509 passed
 ```
 
 | 文件 | 覆盖 |
@@ -222,17 +235,39 @@ assert 真聚合的结果 == 对新集合从零算一遍的结果
 | `test_scheme.py` | #12~#22，双路径一致 + 失败环节可区分 |
 | `test_agg_disagg.py` | #23~#26，**真聚合 == 直算**、合并顺序无关、可反复合并 |
 | `test_core_abstraction.py` | 统一摘要层：`digest_of` / `add_back` 的等式 |
-| `test_vds.py` | 论文 §8.2 全流程 + 篡改/伪造/丢数据三类攻击 |
+| `test_fastopen.py` | §4.2 `PPCom` / `FastOpen`；块划分、等价性、代价形状 |
+| `test_yinyan.py` | §5.1 阴阳方案：`PartndPrimeProd` 不变量、打开/验证、拆合、`k>1` |
+| `test_pok.py` | §6 四个 AoK：诚实通过 + 替换语句/分量/转录都被拒 |
+| `test_vds.py` | §8.2 全流程 + 篡改/伪造/丢数据三类攻击 |
 | `test_updates.py` | 增删改：每次更新后节点视图合法 + 检索验证通过 + 内容按预期变化 |
+| `test_pos.py` | 附录 D.1 的 PoR / PDP 与并行聚合 |
+| `test_vds1.py` | §8.1 `VDS1`：分发/检索/聚合、`CreateFrom`/`GetCreate`、三种更新的 `I ∩ K` 情形、重放与陈旧摘要 |
 
 ---
 
-## 未实现的部分（如实说明）
+## 实现范围与已知取舍
+
+论文里**三条主线全部实现**：
+
+| 主线 | 论文 | 代码 |
+|---|---|---|
+| 第二个 SVC（单个群元素的承诺） | §5.2、§4.2 | `svc/scheme.py`、`svc/fastopen.py` |
+| `VDS2`（基于 §5.2） | §7、§8.2 | `vds/` |
+| 存储证明 PoR / PDP | 附录 D.1 | `vds/pos.py` |
+| 第一个 SVC（阴阳方案，双累加器） | §5.1 | `svc/yinyan.py` |
+| 知识论证族 | §6（含 §6.3） | `svc/pok.py` |
+| `VDS1`（含 `CreateFrom` / `GetCreate`） | §8.1 | `vds/vds1.py` |
+
+### 仍然没做的
 
 | 未实现 | 原因 |
 |---|---|
-| `StrgNode.CreateFrom` / `ClntNode.GetCreate` | 依赖论文 **§6 的 `PoKSubV`**。而 `PoKSubV` 建立在 **§5.1 阴阳方案**之上（CRS 是 `(G,g,g₀,g₁,PrimeGen,Uₙ)` 双生成元、承诺是 `C:=({A,B},πprod)`、还依赖 `PartndPrimeProd`），要做它必须先实现整个 §5.1。调用会明确抛 `NotImplementedError`，**主流程不受影响** |
+| 附录 C 的 `PoKChange` / `PoKAdd` / `PoKDelete` | 三种更新的**零知识**论证。本实现的 §8.1 更新走的是「发布 `Υ_∆` + `VC.Ver'` 验证」，功能上是完整的一条链，只是 `mod` / `del` 的 `Υ_∆` 里会带上旧值；只有「更新内容本身敏感」时才必需它们 |
 | 并行化 | 素数生成与大批量模幂目前单线程。加速要用 `multiprocessing` 而非线程 —— CPython 的模幂计算期间**持有 GIL** |
+| 附录 A / B / D.2 / E / F | A 是 `PoProd` 的低效写法（论文自己说更慢）、B 是 [BBF19] 方案的预处理分析、D.2 是 `VDS1` 的 PDP（附录 D.1 的通用 PoR 已实现）、E 是强安全变体（验证时间线性于文件长度）、F 是与 BBF19 的实测对比 |
+| §8.3 的「分块哈希」包装 | 可把 `N·ℓ_H` 比特的向量压到 `N·2λ` 比特的代价，从而支持 2^20 比特级文件；不影响正确性，只影响能撑多大 |
+
+详见 `docs/与论文对照.md` §5。
 
 ### 已实现（含论文 §8.2 的文件增删改）
 
@@ -246,7 +281,10 @@ assert 真聚合的结果 == 对新集合从零算一遍的结果
 > （`Γ/∆`、`PartndPrimeProd`），而 §8.2 的摘要却是 §5.2 的形式 ——
 > 那一段是从 §8.1 抄过来的，逐字转写做不到。
 > 本实现**从摘要代数独立推导**三个公式，并用独立的 `svc.verify` 逐步验证。
-> 详见 `docs/与论文对照.md`。
+
+> ⚠️ 论文 §8.1 有两处笔误，已按代数自洽修正：`CreateFrom` 返回的 `st'`
+> 应是**新摘要**下的打开（论文正文写的是旧摘要下的），`add` 发布者的 `st' ← st`
+> 理由不成立但结论对。详见 `docs/与论文对照.md` §4.5。
 
 详见 `docs/与论文对照.md`。
 

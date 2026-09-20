@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>可验证分布式存储 · 第二个 SVC 方案演示</title>
+<title>可验证分布式存储 · 两套 VDS 方案演示（§5.2/§8.2 与 §5.1/§8.1）</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header>
-  <h1>可验证分布式存储 <span class="sub">VDS · 第二个 SVC 方案（论文 §5.2 / §8.2）</span></h1>
+  <h1>可验证分布式存储 <span class="sub">VDS · 两套方案（论文 §5.2 / §8.2）与（§5.1 / §8.1）</span></h1>
   <p class="lede">
     一个文件被切成若干块，存在不同的服务器上。任何人可以检索文件的若干部分，
     服务器返回<strong>内容</strong>与<strong>相应证据</strong>；
@@ -48,11 +48,34 @@
       <button id="btn-aggregate">⑤ 聚合成一个证据</button>
       <button id="btn-verify">⑥ 验证这一个证据</button>
       <span class="sep"></span>
+      <button id="btn-expand">⤢ 展开全部完整值</button>
+      <span class="sep"></span>
       <button id="btn-tamper" class="danger">☠ 让服务器篡改内容</button>
       <button id="btn-forge" class="danger">☠ 让服务器伪造证据</button>
       <button id="btn-reset">重置</button>
     </div>
-    <p class="hint" id="hint">提示：模数位长设小一点（512）能让演示快很多；真实安全强度需要 2048 位以上。</p>
+    <p class="hint" id="hint">
+      提示：<strong>真正的块数 = ⌈文件字节数 ÷ 每块字节数⌉</strong>，
+      「n max」只是素数表容量上限；「服务器台数」会被 <code>min(台数, 块数)</code> 截断。
+      模数位长设小一点（512）能让演示快很多；真实安全强度需要 2048 位以上。
+    </p>
+  </section>
+
+  <!-- ================= 进度 ================= -->
+  <section class="panel" id="panel-progress" hidden>
+    <h2>执行中</h2>
+    <div class="prog">
+      <div class="prog-head">
+        <span id="prog-phase">—</span>
+        <span id="prog-time" class="mono">0.0 s</span>
+      </div>
+      <div class="prog-track"><div class="prog-fill" id="prog-fill"></div></div>
+      <div class="prog-sub" id="prog-sub">—</div>
+    </div>
+    <p class="hint">
+      进度来自后端真实的分步子步骤（分发阶段按服务器台数推进）；
+      「预计」是按实测代价模型拟合的参考值，可能偏差 ±30%。
+    </p>
   </section>
 
   <!-- ================= 摘要 ================= -->
@@ -66,6 +89,11 @@
     <p class="hint">
       摘要的大小与文件长度<strong>无关</strong>：永远是两个群元素加一个整数。
       客户端只保存这三样东西。
+    </p>
+    <p class="hint">
+      数值默认只显示指纹，<strong>点击任意指纹</strong>即可展开完整值
+      （512 位群元素 = 130 个十六进制字符），点旁边的 <code>⧉</code> 复制。
+      也可以点控制区的「⤢ 展开全部完整值」一次看全部。
     </p>
   </section>
 
@@ -101,6 +129,29 @@
     </div>
   </section>
 
+  <!-- ================= §8.1 的 VDS1 ================= -->
+  <section class="panel">
+    <h2>5 · 另一套方案：§8.1 的 VDS1（能派生新文件）</h2>
+    <p class="hint">
+      上面整条流程是 <strong>§8.2 的 VDS2</strong>：承诺与打开各一个群元素，但
+      <strong>没有</strong>「从一个已存文件里派生出新文件」的能力。
+      <strong>§8.1 的 VDS1</strong> 多花一个群元素（承诺变成一对累加器
+      <code>(A, B)</code>），换来 <code>CreateFrom</code> / <code>GetCreate</code>：
+      只存了文件一部分的节点能派生出新文件，客户端只用一个<strong>常数大小</strong>的
+      <code>PoKSubV'</code> 证明就能核实「新摘要确实是原文件那一段」。
+    </p>
+    <p class="hint">
+      下面这个按钮会<strong>现场</strong>建一份独立的 VDS1 会话（与上面的状态无关），
+      跑完：Bootstrap → 提交 → 分发 → 检索聚合验证 → <strong>派生新文件</strong> →
+      <strong>mod / add / del</strong>（每步都给 <code>I ∩ K</code> 三种情形各造一个探测节点）
+      → 四类攻击。
+    </p>
+    <div class="actions">
+      <button id="btn-vds1" class="primary">▶ 跑一遍 VDS1</button>
+    </div>
+    <div class="mini" id="vds1-body" hidden>—</div>
+  </section>
+
   <!-- ================= 日志 ================= -->
   <section class="panel">
     <h2>执行日志</h2>
@@ -111,8 +162,9 @@
 <footer>
   <p>
     实现依据：ASIACRYPT 2020,
-    <em>Incrementally Aggregatable Vector Commitments and Applications to Verifiable Decentralized Storage</em>,
-    §5.2（第二个 SVC）与 §8.2（VDS2）。
+    <em>Incrementally Aggregatable Vector Commitments and Applications to Verifiable Decentralized Storage</em>，
+    §5.2 + §8.2（VDS2，上面的主流程）、§5.1 + §6 + §8.1（VDS1，第 5 节）、
+    附录 D.1（存储证明）。
     纯 Python、零第三方依赖，测试见 <code>tests/</code>。
   </p>
 </footer>

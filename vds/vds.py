@@ -138,10 +138,15 @@ class VDSSession:
     # -------------------------------------------------------------------
 
     def commit_file(
-        self, values: Sequence[int]
+        self,
+        values: Sequence[int],
+        progress=None,
     ) -> tuple[Digest, CRSn]:
         """把向量 ``values`` 变成一个文件：``VC.Specialize`` + ``VC.Com``。
 
+        :param progress: 可选的进度回调 ``progress(done, total, detail)``。
+                         长任务（几千块）下最难等的是素数生成那一段，
+                         回调让调用方能报告进度。默认为 ``None``，行为不变。
         :returns: ``(摘要, crs_n)``。``crs_n`` 交还给调用方是为了后续
                   :func:`svc.open_subvector` / :func:`svc.disagg` 复用，
                   免得重复算 ``e_all``。
@@ -158,14 +163,23 @@ class VDSSession:
             if v < 0 or v >= (1 << self.l):
                 raise ValueError(f"值 {v} 超出 l = {self.l} 位的范围 [0, 2^{self.l})")
 
+        total = 3
+        if progress is not None:
+            progress(0, total, f"生成 {n} 个素数并累加出 U_n")
         crs_n = svc_specialize(self.crs, n)
+
+        if progress is not None:
+            progress(1, total, "计算承诺 C")
         com = svc_commit(crs_n, values)
+
         delta = Digest(U=crs_n.U_n, C=com.C, n=n)
         self._crsn_cache[n] = crs_n
+        if progress is not None:
+            progress(total, total, "完成")
         return delta, crs_n
 
     def commit_bytes(
-        self, data: bytes, block_bytes: int
+        self, data: bytes, block_bytes: int, progress=None
     ) -> tuple[Digest, CRSn, tuple[int, ...], int]:
         """``bytes`` 版本的便捷入口。
 
@@ -177,7 +191,7 @@ class VDSSession:
                 f"（要求 l = 8·block_bytes）"
             )
         values = split_bytes(data, block_bytes)
-        delta, crs_n = self.commit_file(values)
+        delta, crs_n = self.commit_file(values, progress=progress)
         return delta, crs_n, tuple(values), len(data)
 
     # -------------------------------------------------------------------
@@ -190,6 +204,7 @@ class VDSSession:
         values: Sequence[int],
         assignments: Iterable[Sequence[int]],
         crs_n: CRSn | None = None,
+        progress=None,
     ) -> list[StorageNode]:
         """把文件按 ``assignments`` 分发给若干存储节点。
 
@@ -205,9 +220,11 @@ class VDSSession:
         crs_n = crs_n or self.crs_n_for(delta)
         values = list(values)
 
+        groups = list(assignments)
+        total = len(groups)
         seen: set[int] = set()
         nodes: list[StorageNode] = []
-        for idx, raw in enumerate(assignments):
+        for idx, raw in enumerate(groups):
             I_set = as_index_set(raw)
             if not I_set:
                 continue
@@ -236,6 +253,8 @@ class VDSSession:
                     ),
                 )
             )
+            if progress is not None:
+                progress(idx + 1, total, f"node-{idx} 拿到 {len(I_set)} 块的证明")
         return nodes
 
     # -------------------------------------------------------------------

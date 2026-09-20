@@ -9,7 +9,7 @@
 ``p``、``q`` 生成后立刻丢弃，**方案运行期间任何人都不知道** ``\\varphi(N)``。
 这保证了「求 ``e`` 次根」是困难的（strong RSA 假设），
 也保证了 :func:`~svc.mathbase.mod_inverse` 只能用 ``N`` 而不能用群阶 ——
-这恰恰是本方案能公开计算 ``S_j`` 的 ``1/e_I`` 次方的根本原因。
+这正是本方案能公开计算 ``S_j`` 的 ``1/e_I`` 次方的原因。
 """
 
 from __future__ import annotations

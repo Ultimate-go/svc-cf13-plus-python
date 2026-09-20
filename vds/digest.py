@@ -59,7 +59,7 @@ class LocalView:
     换成方案 §5.2 的记号就是：:math:`S_I^{e_I} = U_n` 且
     :math:`\\Lambda_I^{e_I} \\cdot \\prod_{i \\in I} S_i^{F_i} = C` ——
     **正好就是 :func:`svc.verify` 的两步校验**。
-    也就是说：「某个存储节点确实老老实实存着它声称的那部分数据」
+    即：「某个存储节点确实老老实实存着它声称的那部分数据」
     这件事，可以用同一个 :func:`svc.verify` 直接检查。
     见 :meth:`~vds.storage_node.StorageNode.check_local_view`。
     """
