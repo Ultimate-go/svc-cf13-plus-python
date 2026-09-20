@@ -25,6 +25,82 @@ function short(s, keep = 20) {
   return `${s.slice(0, keep)}…${s.slice(-keep)}`;
 }
 
+/** HTML 属性转义。完整值虽然只有十六进制字符，转义一下更稳妥。 */
+function escapeAttr(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+/** 展开/收起一个值，并同步它所在的块（块的 white-space 要跟着变）。 */
+function setExpanded(el, open) {
+  el.classList.toggle("open", open);
+  const blk = el.closest(".blk");
+  if (blk) blk.classList.toggle("open", open);
+}
+
+/** 大整数的可展开显示：默认「指纹 + 位长」，点击后展开**完整**十六进制。
+ *
+ * 512 位的群元素展开后是 130 个字符（0x + 128 位），靠 CSS 的
+ * word-break 自动折行。完整值同时放进隐藏的 .hx-f 与 data-copy：
+ * 前者供人眼阅读/选中，后者供 ⧉ 按钮复制。
+ */
+function hexCell(n) {
+  if (n == null) return '<span class="na">—</span>';
+  const full = n.hex || "";
+  return (
+    `<span class="hx" role="button" tabindex="0" ` +
+      `title="点击展开完整值（${n.bits} 位）">` +
+      `<span class="hx-c">${n.fp}<em>${n.bits}b</em></span>` +
+      `<span class="hx-f">${escapeAttr(full)}</span>` +
+    `</span>` +
+    `<span class="cp" role="button" tabindex="0" title="复制完整值" ` +
+      `data-copy="${escapeAttr(full)}">⧉</span>`
+  );
+}
+
+/** 内容字节块：同样是「截断显示 + 点击展开完整字节」。 */
+function bytesCell(hexStr) {
+  if (!hexStr) return '<span class="na">—</span>';
+  return (
+    `<span class="hx" role="button" tabindex="0" title="点击展开完整字节">` +
+      `<span class="hx-c">${short(hexStr, 10)}</span>` +
+      `<span class="hx-f">${escapeAttr(hexStr)}</span>` +
+    `</span>`
+  );
+}
+
+/** 复制到剪贴板。localhost 下 navigator.clipboard 可用，另有 execCommand 兜底。 */
+async function copyText(text, el) {
+  if (!text) return;
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    }
+    if (el) {
+      el.textContent = "✓";
+      el.classList.add("done");
+      setTimeout(() => {
+        el.textContent = "⧉";
+        el.classList.remove("done");
+      }, 1200);
+    }
+  } catch (err) {
+    log(`复制失败：${err.message}`, "err");
+  }
+}
+
 function nowStamp() {
   const d = new Date();
   return d.toTimeString().slice(0, 8);
@@ -68,19 +144,12 @@ async function post(path, body = {}) {
 
 /* ------------------------------------------------------------ 渲染函数 */
 
-function numCell(n) {
-  if (!n) return "—";
-  return `${n.fp}  (${n.bits} 位)`;
-}
-
 function renderDigest(d) {
   state.digest = d;
   $("panel-digest").hidden = false;
   $("d-n").textContent = d.n;
-  $("d-U").textContent = short(d.U.hex);
-  $("d-U").title = d.U.hex + `\n(${d.U.bits} 位, 指纹 ${d.U.fp})`;
-  $("d-C").textContent = short(d.C.hex);
-  $("d-C").title = d.C.hex + `\n(${d.C.bits} 位, 指纹 ${d.C.fp})`;
+  $("d-U").innerHTML = hexCell(d.U);
+  $("d-C").innerHTML = hexCell(d.C);
 }
 
 function renderNodes(nodes) {
@@ -96,8 +165,8 @@ function renderNodes(nodes) {
       <h4>${nd.id}<span class="tag">${nd.valid ? "本地视图合法" : "视图不合法"}</span></h4>
       <dl>
         <dt>持有下标</dt><dd>${nd.indices.join(", ") || "（空）"}</dd>
-        <dt>S<sub>I</sub></dt><dd>${numCell(nd.S)}</dd>
-        <dt>Λ<sub>I</sub></dt><dd>${numCell(nd.Lambda)}</dd>
+        <dt>S<sub>I</sub></dt><dd>${hexCell(nd.S)}</dd>
+        <dt>Λ<sub>I</sub></dt><dd>${hexCell(nd.Lambda)}</dd>
       </dl>
       <div class="blocks"></div>`;
     const blocks = el.querySelector(".blocks");
@@ -105,7 +174,7 @@ function renderNodes(nodes) {
       const b = document.createElement("span");
       b.className = "blk";
       b.innerHTML = `<em>#${idx}</em>`;
-      b.appendChild(document.createTextNode(short(nd.bytes[k] || "", 12)));
+      b.insertAdjacentHTML("beforeend", bytesCell(nd.bytes[k]));
       blocks.appendChild(b);
     });
     box.appendChild(el);
@@ -122,7 +191,10 @@ function renderCerts(data) {
     box.insertAdjacentHTML(
       "beforeend",
       `<div class="row"><span>${c.source} · [${c.Q.join(",")}]</span>
-       <span>${numCell(c.S)}</span></div>`
+       <span class="val">
+         <i class="lab">S</i>${hexCell(c.S)}<br>
+         <i class="lab">Λ</i>${hexCell(c.Lambda)}
+       </span></div>`
     );
   }
   box.insertAdjacentHTML(
@@ -137,8 +209,8 @@ function renderMerged(m) {
   box.innerHTML = `
     <div class="row"><span>来源</span><span>${m.merged_from} 份 → 1 份</span></div>
     <div class="row"><span>覆盖下标</span><span>[${m.I.join(",")}]</span></div>
-    <div class="row"><span>S<sub>I</sub></span><span>${numCell(m.S)}</span></div>
-    <div class="row"><span>Λ<sub>I</sub></span><span>${numCell(m.Lambda)}</span></div>`;
+    <div class="row"><span>S<sub>I</sub></span><span class="val">${hexCell(m.S)}</span></div>
+    <div class="row"><span>Λ<sub>I</sub></span><span class="val">${hexCell(m.Lambda)}</span></div>`;
 }
 
 function renderVerify(v) {
@@ -292,6 +364,7 @@ async function doReset() {
   $("certs-list").innerHTML = "—";
   $("merged-body").innerHTML = "—";
   $("verify-body").innerHTML = "—";
+  $("btn-expand").textContent = "⤢ 展开全部完整值";
   log("已重置界面；后端的会话会在下一次「建立会话」时重建。");
 }
 
@@ -321,5 +394,37 @@ bind("btn-tamper", () => doAttack("tamper"), "篡改攻击");
 bind("btn-forge", () => doAttack("forge"), "伪造攻击");
 bind("btn-full", doFull, "一键演示");
 bind("btn-reset", doReset, "重置");
+
+/* ---- 完整值：点击展开 / 回车展开 / ⧉ 复制 ----
+ *
+ * 用事件委托挂在 document 上，这样每次重新渲染（innerHTML 整个换掉）
+ * 都不需要重新绑定。
+ */
+document.addEventListener("click", (e) => {
+  if (!(e.target instanceof Element)) return;
+  const cp = e.target.closest(".cp");
+  if (cp) {
+    copyText(cp.dataset.copy || "", cp);
+    return;
+  }
+  const hx = e.target.closest(".hx");
+  if (hx) setExpanded(hx, !hx.classList.contains("open"));
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" && e.key !== " ") return;
+  if (!(e.target instanceof Element)) return;
+  const el = e.target.closest(".hx, .cp");
+  if (!el) return;
+  e.preventDefault();
+  if (el.classList.contains("cp")) copyText(el.dataset.copy || "", el);
+  else setExpanded(el, !el.classList.contains("open"));
+});
+
+$("btn-expand").addEventListener("click", () => {
+  const anyClosed = !!document.querySelector(".hx:not(.open)");
+  document.querySelectorAll(".hx").forEach((el) => setExpanded(el, anyClosed));
+  $("btn-expand").textContent = anyClosed ? "⤡ 收起全部" : "⤢ 展开全部完整值";
+});
 
 log("就绪。点「一键跑完整流程」开始，或按 ①②③④⑤⑥ 分步观察。");

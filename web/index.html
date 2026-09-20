@@ -48,6 +48,8 @@
       <button id="btn-aggregate">⑤ 聚合成一个证据</button>
       <button id="btn-verify">⑥ 验证这一个证据</button>
       <span class="sep"></span>
+      <button id="btn-expand">⤢ 展开全部完整值</button>
+      <span class="sep"></span>
       <button id="btn-tamper" class="danger">☠ 让服务器篡改内容</button>
       <button id="btn-forge" class="danger">☠ 让服务器伪造证据</button>
       <button id="btn-reset">重置</button>
@@ -66,6 +68,11 @@
     <p class="hint">
       摘要的大小与文件长度<strong>无关</strong>：永远是两个群元素加一个整数。
       客户端只保存这三样东西。
+    </p>
+    <p class="hint">
+      数值默认只显示指纹，<strong>点击任意指纹</strong>即可展开完整值
+      （512 位群元素 = 130 个十六进制字符），点旁边的 <code>⧉</code> 复制。
+      也可以点控制区的「⤢ 展开全部完整值」一次看全部。
     </p>
   </section>
 
