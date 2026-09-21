@@ -68,8 +68,6 @@ python_SVC_v1/
 │  ├─ primegen.py          下标→素数映射（#10、#11）
 │  ├─ scheme.py            中间量 + 本体 + 聚合拆分（#12~#26）
 │  ├─ fastopen.py          §4.2 预处理提交与快速打开（PPCom / FastOpen）
-│  ├─ yinyan.py            §5.1 阴阳方案（双累加器 SVC）
-│  ├─ pok.py               §6 知识论证（PoProd2 / PoProd* / PoKOpen / PoKSubV / PoKComSub）
 │  ├─ rng.py               可复现随机源
 │  └─ types.py             数据结构
 ├─ vds/                    ★ 可验证分布式存储
@@ -79,13 +77,11 @@ python_SVC_v1/
 │  ├─ client_node.py       ClntNode.*（AggregateCertificates / VerRetrieve / PoS-Ver）
 │  ├─ updates.py           两段式更新（PushUpdate / ApplyUpdate）
 │  ├─ pos.py               附录 D.1 存储证明（PoS / 并行 PoS）
-│  ├─ vds.py               VDSSession，串起 §8.2 的全流程
-│  └─ vds1.py              ★ §8.1 的 VDS1（含 CreateFrom / GetCreate）
+│  └─ vds.py               VDSSession，串起 §8.2 的全流程
 ├─ server/app.py           零依赖演示后端（标准库 http.server）
 ├─ web/                    前端页面（原生 HTML/CSS/JS，无构建步骤）
-├─ tests/                  509 个测试
+├─ tests/                  321 个测试
 ├─ demo/end_to_end.py      §8.2 命令行端到端演示
-├─ demo/vds1_create_from.py §8.1 命令行端到端演示（派生子文件 / 三种更新）
 ├─ bench/bench_scale.py    规模与性能测试
 ├─ tools/fix_md_math.py    维护脚本：把文档里的 LaTeX 换成 Unicode
 └─ docs/                   设计说明与论文对照
@@ -225,7 +221,7 @@ assert 真聚合的结果 == 对新集合从零算一遍的结果
 ## 测试
 
 ```
-509 passed
+321 passed
 ```
 
 | 文件 | 覆盖 |
@@ -236,35 +232,29 @@ assert 真聚合的结果 == 对新集合从零算一遍的结果
 | `test_agg_disagg.py` | #23~#26，**真聚合 == 直算**、合并顺序无关、可反复合并 |
 | `test_core_abstraction.py` | 统一摘要层：`digest_of` / `add_back` 的等式 |
 | `test_fastopen.py` | §4.2 `PPCom` / `FastOpen`；块划分、等价性、代价形状 |
-| `test_yinyan.py` | §5.1 阴阳方案：`PartndPrimeProd` 不变量、打开/验证、拆合、`k>1` |
-| `test_pok.py` | §6 四个 AoK：诚实通过 + 替换语句/分量/转录都被拒 |
 | `test_vds.py` | §8.2 全流程 + 篡改/伪造/丢数据三类攻击 |
 | `test_updates.py` | 增删改：每次更新后节点视图合法 + 检索验证通过 + 内容按预期变化 |
 | `test_pos.py` | 附录 D.1 的 PoR / PDP 与并行聚合 |
-| `test_vds1.py` | §8.1 `VDS1`：分发/检索/聚合、`CreateFrom`/`GetCreate`、三种更新的 `I ∩ K` 情形、重放与陈旧摘要 |
 
 ---
 
 ## 实现范围与已知取舍
 
-论文里**三条主线全部实现**：
+本项目把论文**第二条主线**（第二个 SVC + 建立在它之上的 VDS）完整实现：
 
 | 主线 | 论文 | 代码 |
 |---|---|---|
 | 第二个 SVC（单个群元素的承诺） | §5.2、§4.2 | `svc/scheme.py`、`svc/fastopen.py` |
 | `VDS2`（基于 §5.2） | §7、§8.2 | `vds/` |
 | 存储证明 PoR / PDP | 附录 D.1 | `vds/pos.py` |
-| 第一个 SVC（阴阳方案，双累加器） | §5.1 | `svc/yinyan.py` |
-| 知识论证族 | §6（含 §6.3） | `svc/pok.py` |
-| `VDS1`（含 `CreateFrom` / `GetCreate`） | §8.1 | `vds/vds1.py` |
 
 ### 仍然没做的
 
 | 未实现 | 原因 |
 |---|---|
-| 附录 C 的 `PoKChange` / `PoKAdd` / `PoKDelete` | 三种更新的**零知识**论证。本实现的 §8.1 更新走的是「发布 `Υ_∆` + `VC.Ver'` 验证」，功能上是完整的一条链，只是 `mod` / `del` 的 `Υ_∆` 里会带上旧值；只有「更新内容本身敏感」时才必需它们 |
+| 附录 C 的 `PoKChange` / `PoKAdd` / `PoKDelete` | 三种更新的**零知识**论证，建在另一个 SVC 构造上，不在本项目范围内。本实现的 §8.2 更新走「发布 `Υ_∆` + `VC.Ver'` 验证」，功能上已是完整的一条链，只是 `mod` / `del` 的 `Υ_∆` 里会带上旧值 |
 | 并行化 | 素数生成与大批量模幂目前单线程。加速要用 `multiprocessing` 而非线程 —— CPython 的模幂计算期间**持有 GIL** |
-| 附录 A / B / D.2 / E / F | A 是 `PoProd` 的低效写法（论文自己说更慢）、B 是 [BBF19] 方案的预处理分析、D.2 是 `VDS1` 的 PDP（附录 D.1 的通用 PoR 已实现）、E 是强安全变体（验证时间线性于文件长度）、F 是与 BBF19 的实测对比 |
+| 附录 A / B / D.2 / E / F | A 是 `PoProd` 的低效写法（论文自己说更慢，属于另一个 SVC 构造）、B 是 [BBF19] 方案的预处理分析、D.2 是另一套 VDS 的 PDP（附录 D.1 的通用 PoR 已实现）、E 是强安全变体（验证时间线性于文件长度）、F 是与 BBF19 的实测对比 |
 | §8.3 的「分块哈希」包装 | 可把 `N·ℓ_H` 比特的向量压到 `N·2λ` 比特的代价，从而支持 2^20 比特级文件；不影响正确性，只影响能撑多大 |
 
 详见 `docs/与论文对照.md` §5。
@@ -277,14 +267,10 @@ assert 真聚合的结果 == 对新集合从零算一遍的结果
 | `add` 追加 | `(U',C')` = 对 `(U,C)` 顺序 `add_back` | `S'_I=S_I^{e_K}`，`Λ'_I=Λ_I^{e_K}∏(·)^{v_j}` |
 | `del` 删末尾 | `δ' = π_K = d(v \ K)` | `K⊆I` 时**一个字都不用改**；不相交时做一次 `agg` |
 
-> ⚠️ 论文 §8.2 的 `PushUpdate`/`ApplyUpdate` **正文里用的是 §5.1 的原语**
-> （`Γ/∆`、`PartndPrimeProd`），而 §8.2 的摘要却是 §5.2 的形式 ——
-> 那一段是从 §8.1 抄过来的，逐字转写做不到。
+> ⚠️ 论文 §8.2 的 `PushUpdate`/`ApplyUpdate` **正文里用的是另一个 SVC 构造的原语**
+> （`Γ/∆`、`PartndPrimeProd`），与它自己给出的 §5.2 摘要形式对不上 ——
+> 那段正文的记号没有与 §5.2 对齐，逐字转写做不到。
 > 本实现**从摘要代数独立推导**三个公式，并用独立的 `svc.verify` 逐步验证。
-
-> ⚠️ 论文 §8.1 有两处笔误，已按代数自洽修正：`CreateFrom` 返回的 `st'`
-> 应是**新摘要**下的打开（论文正文写的是旧摘要下的），`add` 发布者的 `st' ← st`
-> 理由不成立但结论对。详见 `docs/与论文对照.md` §4.5。
 
 详见 `docs/与论文对照.md`。
 

@@ -14,6 +14,8 @@ const state = {
   certs: [],
   merged: null,
   attack: null,
+  fileBytes: null, // 选了文件就用它的原始字节，否则用文本框的 UTF-8 内容
+  fileName: "",
 };
 
 /* ---------------------------------------------------------------- 工具 */
@@ -149,7 +151,6 @@ const STEP_LABEL = {
   aggregate: "⑤ 聚合证据",
   verify: "⑥ 客户端验证",
   attack: "☠ 构造攻击",
-  vds1: "§8.1 VDS1 演示",
 };
 
 function fmtDur(ms) {
@@ -159,12 +160,18 @@ function fmtDur(ms) {
   return `${m} 分 ${((ms % 60000) / 1000).toFixed(0)} 秒`;
 }
 
+/** 本次提交实际要切块的字节数：选了文件就用文件的，否则用文本框的 UTF-8 长度。 */
+function inputBytes() {
+  if (state.fileBytes) return state.fileBytes.length;
+  return new TextEncoder().encode($("text").value).length;
+}
+
 /** 按实测拟合的代价模型粗估该步耗时（毫秒）；返回 null 表示估不出来。 */
 function predictMs(step) {
   const bb = +$("block_bytes").value;
   const mb = +$("modulus_bits").value;
   if (!bb) return null;
-  const n = Math.max(1, Math.ceil(new TextEncoder().encode($("text").value).length / bb));
+  const n = Math.max(1, Math.ceil(inputBytes() / bb));
   const eBits = n * (bb * 8 + 1);
   const scale = Math.pow(Math.max(mb, 64) / 2048, 1.72);
   const commit = 0.206 * eBits * scale;
@@ -407,10 +414,15 @@ async function doSetup() {
 
 async function doCommit() {
   logHead("② 切块并承诺");
-  const r = await post("/api/commit", { text: $("text").value }, "commit");
+  const usingFile = !!state.fileBytes;
+  const body = usingFile
+    ? { data_hex: toHex(state.fileBytes), name: state.fileName }
+    : { text: $("text").value };
+  const r = await post("/api/commit", body, "commit");
   renderDigest(r.digest);
   log(
-    `${r.nbytes} 字节 ÷ 每块 ${$("block_bytes").value} 字节 → ${r.n} 块` +
+    `来源：${usingFile ? `上传文件「${state.fileName}」` : "文本框内容"} → ` +
+      `${r.nbytes} 字节 ÷ 每块 ${$("block_bytes").value} 字节 → ${r.n} 块` +
       `（「n max」= ${$("n_max").value} 只是素数表容量上限，块数只看文件大小）`,
     "ok", r.ms
   );
@@ -525,101 +537,8 @@ async function doReset() {
   $("certs-list").innerHTML = "—";
   $("merged-body").innerHTML = "—";
   $("verify-body").innerHTML = "—";
-  $("vds1-body").hidden = true;
-  $("vds1-body").innerHTML = "—";
   $("btn-expand").textContent = "⤢ 展开全部完整值";
   log("已重置界面；后端的会话会在下一次「建立会话」时重建。");
-}
-
-/* ------------------------------------------------ §8.1 的 VDS1 演示
- *
- * 与上面那条 §8.2 的流水线**完全独立**：后端每次调用都现场建一份 VDS1 会话，
- * 不动当前状态。重点展示 §8.2 没有的那个能力 —— CreateFrom / GetCreate。
- */
-
-function kvRow(k, v) {
-  return `<div class="row"><span>${k}</span><span class="val">${v}</span></div>`;
-}
-
-function kvHead(t) {
-  return `<div class="row"><span><b>${t}</b></span><span></span></div>`;
-}
-
-async function doVds1() {
-  logHead("§8.1 的 VDS1");
-  const box = $("vds1-body");
-  box.hidden = false;
-  box.innerHTML = '<span class="na">运行中…</span>';
-
-  const data = await post(
-    "/api/vds1",
-    {
-      text: $("text").value,
-      n_max: Math.min(64, Math.max(8, +$("n_max").value || 24)),
-      modulus_bits: +$("modulus_bits").value || 512,
-    },
-    "vds1"
-  );
-
-  log(
-    `|N| = ${data.pp.N_bits} 位，n_max = ${data.pp.n_max}，取 ${data.file.n} 位` +
-      (data.file.truncated ? "（文本太长，已截断）" : ""),
-    "",
-    data.ms
-  );
-  for (const s of data.steps) {
-    log(`${s.ok ? "✓" : "✗"} ${s.step} —— ${s.detail}`, s.ok ? "" : "err", s.ms);
-  }
-
-  const out = [];
-  out.push(kvHead("摘要 δ = ((A, B), n)"));
-  out.push(kvRow("A = g₀^a", hexCell(data.digest.A)));
-  out.push(kvRow("B = g₁^b", hexCell(data.digest.B)));
-  out.push(kvRow("n（位数）", String(data.digest.n)));
-
-  out.push(kvHead("存储节点（各自只持自己那段）"));
-  for (const nd of data.nodes) {
-    out.push(
-      `<div class="row"><span>${nd.id} 持 [${nd.indices.join(", ")}]</span>` +
-        `<span>${nd.valid ? "本地视图合法" : "视图不合法"}</span></div>`
-    );
-  }
-
-  const c = data.create;
-  out.push(kvHead("CreateFrom / GetCreate —— §8.2 没有这个能力"));
-  out.push(kvRow("派生前 m 位", String(c.m)));
-  out.push(kvRow("δ′ == Com′(F_J)", c.matches ? "✓" : "✗"));
-  out.push(kvRow("派生节点视图合法", c.derived_valid ? "✓" : "✗"));
-  out.push(kvRow("客户端 PoKSubV′.V", c.accepted ? "✓ 接受" : "✗ 拒绝"));
-  out.push(kvRow("伪造 δ′", c.forged_rejected ? "✓ 被拒" : "✗ 通过了"));
-  out.push(kvRow("非前缀 J", c.nonprefix_rejected ? "✓ 被拒" : "✗ 通过了"));
-
-  out.push(kvHead("三种更新（每步都给 I∩K 各种情形各造一个探测节点）"));
-  for (const u of data.updates) {
-    const applied = u.applied
-      .map((a) => {
-        if (!a.ok) return `${a.kind}: ✗`;
-        const idx = a.indices.length ? `[${a.indices.join(",")}]` : "空（节点应下线）";
-        return `${a.kind}: ✓（视图${a.valid ? "合法" : "不合法"}，新 I=${idx}）`;
-      })
-      .join("<br>");
-    out.push(
-      `<div class="row"><span>${u.op}<br>` +
-        `<i class="lab">K = [${u.K.join(",")}] → n = ${u.n}</i></span>` +
-        `<span>δ′ == 重新承诺整个文件 ? ${u.matches ? "✓" : "✗"}；` +
-        `客户端 ${u.client_ok ? "✓" : "✗"}<br>${applied}</span></div>`
-    );
-  }
-
-  out.push(kvHead("攻击面"));
-  for (const a of data.attacks) {
-    out.push(
-      `<div class="row"><span>${a.what}<br><i class="lab">${a.how}</i></span>` +
-        `<span>${a.rejected ? "✓ 被拒" : "✗ 通过了"}</span></div>`
-    );
-  }
-  box.innerHTML = out.join("");
-  log("VDS1 演示完成：派生新文件 + 三种更新 + 四类攻击全部符合预期。");
 }
 
 /* ------------------------------------------------------------ 事件绑定 */
@@ -655,8 +574,64 @@ bind("btn-verify", doVerify, "验证");
 bind("btn-tamper", () => doAttack("tamper"), "篡改攻击");
 bind("btn-forge", () => doAttack("forge"), "伪造攻击");
 bind("btn-full", doFull, "一键演示");
-bind("btn-vds1", doVds1, "VDS1 演示");
 bind("btn-reset", doReset, "重置");
+
+/* ---- 文件上传：按原始字节切块（二进制安全） ----
+ *
+ * 不把文件读成文本再编码：二进制文件那样会被损坏，而且字节数会变。
+ * 这里取 ArrayBuffer 转十六进制发给后端，由 bytes.fromhex 还原。
+ */
+
+function toHex(bytes) {
+  let out = "";
+  for (const b of bytes) out += b.toString(16).padStart(2, "0");
+  return out;
+}
+
+function fmtBytes(n) {
+  if (n < 1024) return `${n} 字节`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1048576).toFixed(2)} MB`;
+}
+
+function updateFileInfo() {
+  const el = $("file-info");
+  const bb = +$("block_bytes").value || 1;
+  const nm = +$("n_max").value || 1;
+  if (!state.fileBytes) {
+    el.textContent = `未选文件 —— 将使用文本框内容（${fmtBytes(inputBytes())}）`;
+    el.classList.remove("ok", "err");
+    return;
+  }
+  const n = Math.ceil(state.fileBytes.length / bb);
+  const over = n > nm;
+  el.textContent =
+    `${state.fileName} · ${fmtBytes(state.fileBytes.length)} → 切成 ${n} 块` +
+    (over ? `；超过 n max = ${nm}，请把 n max 调大` : `（n max = ${nm}）`);
+  el.classList.toggle("err", over);
+  el.classList.toggle("ok", !over);
+}
+
+$("file").addEventListener("change", async (e) => {
+  const f = e.target.files && e.target.files[0];
+  if (!f) return;
+  state.fileBytes = new Uint8Array(await f.arrayBuffer());
+  state.fileName = f.name;
+  updateFileInfo();
+  log(`已选文件「${f.name}」，${fmtBytes(state.fileBytes.length)} —— 提交时按原始字节切块。`);
+});
+
+$("btn-clear-file").addEventListener("click", () => {
+  state.fileBytes = null;
+  state.fileName = "";
+  $("file").value = "";
+  updateFileInfo();
+  log("已取消文件选择，改为使用文本框内容。");
+});
+
+for (const id of ["block_bytes", "n_max"]) $(id).addEventListener("input", updateFileInfo);
+$("text").addEventListener("input", updateFileInfo);
+updateFileInfo();
 
 /* ---- 完整值：点击展开 / 回车展开 / ⧉ 复制 ----
  *
@@ -690,5 +665,5 @@ $("btn-expand").addEventListener("click", () => {
   $("btn-expand").textContent = anyClosed ? "⤡ 收起全部" : "⤢ 展开全部完整值";
 });
 
-log("就绪。点「一键跑完整流程」开始，或按 ①②③④⑤⑥ 分步观察。");
-log("第 5 节的按钮会另跑一遍 §8.1 的 VDS1（派生新文件 + 三种更新）。");
+log("就绪。可以先上传一个文件，或直接在文本框里输入内容，再点「一键跑完整流程」。");
+log("上传的文件按原始字节切块（二进制安全）；不选文件时用文本框的 UTF-8 内容。");

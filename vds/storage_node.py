@@ -83,8 +83,8 @@ class UpdateWitness:
           :math:`S_K^{e_K} = U^{e_K} = U'`。
 
           论文 §8.2 把这一行也写成 ``= U``，与它自己前一行
-          ``U′ ← U^{∏_{i∈K} e_i}`` 矛盾（该节正文是从 §8.1 抄来的，
-          记号没改成 §5.2）。这里按代数上自洽的形式取 ``= U'``。
+          ``U′ ← U^{∏_{i∈K} e_i}`` 矛盾（该节正文的记号与 §5.2 不一致）。
+          这里按代数上自洽的形式取 ``= U'``。
 
         :returns: ``(b, 说明)``；``b`` 为假时说明写清了失败原因
         """
@@ -178,7 +178,7 @@ class StorageNode:
     def check_local_view(self) -> bool:
         """检查「本节点确实老实存着它声称的那部分数据」。
 
-        论文 VDS1 正确性证明里给的判据是
+        方案正确性证明里给的判据是
         :math:`st_1^{a_I} = \\delta_1 \\wedge st_2^{b_I} = \\delta_2`。
         换成 §5.2 的记号，这**正好就是** :func:`svc.verify` 的两步校验 ——
         所以直接复用同一个验证器即可，不需要另写一套。
@@ -343,24 +343,18 @@ class StorageNode:
         return pos_aggregate(self.crs_n(), challenge, left, right)
 
     # -------------------------------------------------------------------
-    # StrgNode.CreateFrom —— 从大文件派生小文件
+    # StrgNode.CreateFrom —— 本方案不支持
     # -------------------------------------------------------------------
 
     def create_from(self, J: Sequence[int]) -> tuple[Digest, "StorageNode"]:
-        r"""``StrgNode.CreateFrom`` —— **属于 §8.1 的 ``VDS1``，不在本方案里**。
+        r"""``StrgNode.CreateFrom`` —— **本方案不支持「派生新文件」**。
 
         .. note::
 
-           这个算法**不属于 §8.2**。论文把它放在 §8.1 的 ``VDS1`` 里，
-           而它的存在依赖 §5.1 阴阳方案的代数结构 —— §5.2 把承诺压成了
-           单个群元素（这正是它参数更省的原因），也就失去了
-           ``PoKSubV`` 赖以存在的结构。所以这里不实现它，而是**指向真正
-           实现了它的地方**：
-
-           * :meth:`vds.vds1.StorageNode1.create_from`
-           * :meth:`vds.vds1.ClientNode1.get_create`
-
-           完整走一遍的演示：``python demo/vds1_create_from.py``。
+           本方案（§5.2）把承诺压成了单个群元素，**这正是它参数更省的原因**，
+           代价就是失去了子向量知识论证赖以存在的代数结构。
+           所以这里不实现它。（主流程 commit → 分发 → 检索 → 聚合 → 验证
+           本来就不依赖它。）
 
         论文原文（对照用）::
 
@@ -371,37 +365,26 @@ class StorageNode:
 
         .. warning::
 
-           这个算法的意义**全部**在于那个 :math:`\Upsilon_J` ——
-           它含一个子向量知识论证 :math:`\pi_{PoKSubV'}`，用来向客户端证明
-           「我这个新摘要确实是从原文件的某个子向量切出来的，没有夹带私货」。
-           若把 PoK 部分省掉，:math:`\delta'` 与 :math:`st'` 仍能算出来，
-           但客户端**无从核实**，算法就失去了意义。
+           这个算法的意义**全部**在于那份子向量知识论证 ——
+           它用来向客户端证明「我这个新摘要确实是从原文件的某个子向量
+           切出来的，没有夹带私货」。若把那部分省掉，:math:`\delta'` 与
+           :math:`st'` 仍能算出来，但客户端**无从核实**，算法就失去了意义。
 
-           ``PoKSubV`` 是论文 **§6** 的协议，而它**建立在 §5.1 的阴阳方案之上**，
-           不是 §5.2。它依赖四样东西，§5.2 一样都没有：
+           它依赖四样东西，本方案一样都没有：
 
-           * CRS 里有**两个**生成元 :math:`(g_0, g_1)`（§5.2 只有一个 :math:`g`）
+           * CRS 里有**两个**生成元 :math:`(g_0, g_1)`（本方案只有一个 :math:`g`）
            * 承诺是**一对**累加器 :math:`C := (\{A,B\},\ \pi_{\text{prod}})`
-             （§5.2 的 :math:`C` 是单个群元素）
+             （本方案的 :math:`C` 是单个群元素）
            * :math:`\mathsf{PartndPrimeProd}(I,\vec{v}_I)\to(a_I,b_I)`
              —— 把 :math:`I` 里的素数按「该位是 0 还是 1」分成两堆
-             （§5.2 没有二元划分）
+             （本方案没有二元划分）
            * 打开证明是 :math:`(\Gamma_I, \Delta_I)` 一对
-             （§5.2 是 :math:`(S_I,\Lambda_I)`）
+             （本方案是 :math:`(S_I,\Lambda_I)`）
 
            整套机制建立在「承诺是一对累加器 :math:`A,B`」之上 —— 有了这一对，
            才能把 :math:`(a_I,b_I)` 分别塞进两条等式里做 AND 复合。
-           §5.2 把承诺压成单个群元素（这正是它参数更省的原因），
-           代价就是**失去了 PoKSubV 赖以存在的代数结构**。
-
-           §5.1 与 §6 现在已经完整实现（``svc/yinyan.py`` 与 ``svc/pok.py``），
-           ``VDS1`` 也一并做好了，见 :mod:`vds.vds1`。
-
-           主流程（commit → 分发 → 检索 → 聚合 → 验证）本来就不依赖它。
         """
         raise NotImplementedError(
-            "StrgNode.CreateFrom 属于论文 §8.1 的 VDS1，不在 §8.2 的 VDS2 里。"
-            "请改用 vds.vds1.StorageNode1.create_from —— 它配合 "
-            "vds.vds1.ClientNode1.get_create / PoKSubV' 一起用。"
-            "参见 demo/vds1_create_from.py。"
+            "本方案（§5.2 单生成元 SVC）不支持从已存文件派生新文件："
+            "缺少子向量知识论证所需的双生成元与双累加器结构。"
         )

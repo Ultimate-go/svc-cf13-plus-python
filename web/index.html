@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>可验证分布式存储 · 两套 VDS 方案演示（§5.2/§8.2 与 §5.1/§8.1）</title>
+<title>可验证分布式存储 · VDS 方案演示（论文 §5.2 / §8.2）</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header>
-  <h1>可验证分布式存储 <span class="sub">VDS · 两套方案（论文 §5.2 / §8.2）与（§5.1 / §8.1）</span></h1>
+  <h1>可验证分布式存储 <span class="sub">VDS · 论文 §5.2 / §8.2</span></h1>
   <p class="lede">
     一个文件被切成若干块，存在不同的服务器上。任何人可以检索文件的若干部分，
     服务器返回<strong>内容</strong>与<strong>相应证据</strong>；
@@ -35,8 +35,15 @@
         <input id="n_nodes" type="number" value="4" min="1" max="16">
       </label>
     </div>
-    <label class="full">文件内容
-      <textarea id="text" rows="3">Verifiable Decentralized Storage - ASIACRYPT 2020 eprint 2020/149. 一个文件被切成若干块，分散存在互不信任的服务器上。</textarea>
+    <div class="filerow">
+      <label>上传文件（按原始字节切块，二进制安全）
+        <input id="file" type="file">
+      </label>
+      <button id="btn-clear-file" type="button">✕ 清除文件</button>
+    </div>
+    <p class="hint" id="file-info">—</p>
+    <label class="full">文件内容（不选文件时用它）
+      <textarea id="text" rows="3" placeholder="在这里输入任意文本；或直接上传一个文件。"></textarea>
     </label>
     <div class="actions">
       <button id="btn-full" class="primary">▶ 一键跑完整流程</button>
@@ -129,29 +136,6 @@
     </div>
   </section>
 
-  <!-- ================= §8.1 的 VDS1 ================= -->
-  <section class="panel">
-    <h2>5 · 另一套方案：§8.1 的 VDS1（能派生新文件）</h2>
-    <p class="hint">
-      上面整条流程是 <strong>§8.2 的 VDS2</strong>：承诺与打开各一个群元素，但
-      <strong>没有</strong>「从一个已存文件里派生出新文件」的能力。
-      <strong>§8.1 的 VDS1</strong> 多花一个群元素（承诺变成一对累加器
-      <code>(A, B)</code>），换来 <code>CreateFrom</code> / <code>GetCreate</code>：
-      只存了文件一部分的节点能派生出新文件，客户端只用一个<strong>常数大小</strong>的
-      <code>PoKSubV'</code> 证明就能核实「新摘要确实是原文件那一段」。
-    </p>
-    <p class="hint">
-      下面这个按钮会<strong>现场</strong>建一份独立的 VDS1 会话（与上面的状态无关），
-      跑完：Bootstrap → 提交 → 分发 → 检索聚合验证 → <strong>派生新文件</strong> →
-      <strong>mod / add / del</strong>（每步都给 <code>I ∩ K</code> 三种情形各造一个探测节点）
-      → 四类攻击。
-    </p>
-    <div class="actions">
-      <button id="btn-vds1" class="primary">▶ 跑一遍 VDS1</button>
-    </div>
-    <div class="mini" id="vds1-body" hidden>—</div>
-  </section>
-
   <!-- ================= 日志 ================= -->
   <section class="panel">
     <h2>执行日志</h2>
@@ -163,8 +147,7 @@
   <p>
     实现依据：ASIACRYPT 2020,
     <em>Incrementally Aggregatable Vector Commitments and Applications to Verifiable Decentralized Storage</em>，
-    §5.2 + §8.2（VDS2，上面的主流程）、§5.1 + §6 + §8.1（VDS1，第 5 节）、
-    附录 D.1（存储证明）。
+    §5.2 + §8.2，以及附录 D.1（存储证明）。
     纯 Python、零第三方依赖，测试见 <code>tests/</code>。
   </p>
 </footer>

@@ -244,4 +244,27 @@ footer { padding: 0 32px 36px; color: var(--dim); font-size: 12px; max-width: 12
 .cp:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 .cp.done { color: var(--ok); }
 
+/* 文件上传行 */
+.filerow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 6px 0 2px;
+}
+.filerow label { display: flex; align-items: center; gap: 8px; }
+.filerow input[type="file"] { font: inherit; max-width: 340px; }
+.filerow button {
+  font: inherit;
+  color: var(--dim);
+  background: transparent;
+  border: 1px solid #2a2f3a;
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+.filerow button:hover { color: var(--accent); border-color: var(--accent); }
+#file-info.ok { color: var(--ok); }
+#file-info.err { color: var(--err, #ff8a7a); }
+
 .na { color: var(--dim); }

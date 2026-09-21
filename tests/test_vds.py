@@ -367,26 +367,19 @@ class TestNodeMerge:
 
 
 # ---------------------------------------------------------------------------
-# CreateFrom / GetCreate 属于 §8.1，不在 §8.2 里
+# CreateFrom / GetCreate 不在本方案的能力范围内
 # ---------------------------------------------------------------------------
 
 class TestNotImplemented:
-    def test_create_from_指向_vds1(self, session, file_setup):
+    def test_create_from_明确报错(self, session, file_setup):
         node = file_setup["nodes"][0]
-        with pytest.raises(NotImplementedError, match="vds1"):
+        with pytest.raises(NotImplementedError, match="派生新文件"):
             node.create_from([0, 1])
 
-    def test_get_create_指向_vds1(self, session, file_setup):
+    def test_get_create_明确报错(self, session, file_setup):
         client = session.make_client(file_setup["delta"])
-        with pytest.raises(NotImplementedError, match="vds1"):
+        with pytest.raises(NotImplementedError, match="派生新文件"):
             client.get_create([0, 1])
-
-    def test_vds1_里同时有这两个算法(self):
-        """报错信息指的那个地方确实存在同名方法。"""
-        from vds.vds1 import ClientNode1, StorageNode1
-
-        assert callable(StorageNode1.create_from)
-        assert callable(ClientNode1.get_create)
 
 
 # ---------------------------------------------------------------------------

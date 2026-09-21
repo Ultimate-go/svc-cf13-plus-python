@@ -51,7 +51,7 @@ class Digest:
 class LocalView:
     """存储节点的本地视图 ``(pp, δ, n, st, I, FI)``。
 
-    论文的 VDS1 正确性证明里给了一个很有用的判据：
+    方案正确性证明里给了一个很有用的判据：
 
         a local view of a storage node ``(pp, δ, n, st, I, FI)`` is valid
         if :math:`st_1^{a_I} = \\delta_1 \\wedge st_2^{b_I} = \\delta_2`

@@ -168,36 +168,28 @@ class ClientNode:
         return pos_ver(self, challenge, proof)
 
     # -------------------------------------------------------------------
-    # ClntNode.GetCreate —— 需要 PoKSubV，未实现
+    # ClntNode.GetCreate —— 本方案不支持
     # -------------------------------------------------------------------
 
     def get_create(self, J, Upsilon_J=None):
-        r"""``ClntNode.GetCreate`` —— **属于 §8.1 的 ``VDS1``，不在本方案里**。
+        r"""``ClntNode.GetCreate`` —— **本方案不支持「派生新文件」**。
 
-        论文原文::
+        「从一个已存文件派生出新文件」这个能力，其正确性完全依赖一份
+        子向量知识论证：节点必须向客户端证明「这个新摘要确实是从原文件的
+        某个子向量切出来的，没有夹带私货」。
 
-            ClntNode.GetCreate(δ, J, Υ_J) → (b, δ′)
-                Parse Υ_J := (δ′, π_PoKSubV′), set n′ = |J|
-                Output b ← PoKSubV′.V(pp, (δ, δ′, J), π_J)
-                            ∧ J = {1, ..., |J|} ∧ δ′
+        那套论证需要下面四样东西，本方案（§5.2 的单生成元 SVC）一样都没有：
 
-        .. note::
+        * CRS 里有**两个**生成元 :math:`(g_0, g_1)`（本方案只有一个 :math:`g`）
+        * 承诺是**一对**累加器 :math:`(A, B)`（本方案的 :math:`C` 是单个群元素）
+        * 二元划分 :math:`\mathsf{PartndPrimeProd}`（本方案没有）
+        * 打开证明是**一对** :math:`(\Gamma_I, \Delta_I)`（本方案是 :math:`(S_I, \Lambda_I)`）
 
-           它依赖论文 §6 的子向量知识论证 ``PoKSubV``，而 ``PoKSubV``
-           **建立在 §5.1 阴阳方案之上**（CRS 有两个生成元
-           :math:`g_0,g_1`、承诺是一对累加器、依赖二元划分
-           :math:`\mathsf{PartndPrimeProd}`）。
-           §5.2 把承诺压成单个群元素（这正是它参数更省的原因），
-           也就失去了这套代数结构。
-
-           §5.1 与 §6 现在已经完整实现（``svc/yinyan.py`` 与 ``svc/pok.py``）。
-           对应的 ``GetCreate`` 在 :meth:`vds.vds1.ClientNode1.get_create`，
-           配套的派生端在 :meth:`vds.vds1.StorageNode1.create_from`。
-           完整走一遍：``python demo/vds1_create_from.py``。
+        本方案把承诺压成单个群元素，**这正是它参数更省的原因**，
+        代价就是失去了那套代数结构。
+        所以这里显式报错，而不是返回一个客户端根本无法核实的假派生。
         """
         raise NotImplementedError(
-            "ClntNode.GetCreate 属于论文 §8.1 的 VDS1，不在 §8.2 的 VDS2 里。"
-            "请改用 vds.vds1.ClientNode1.get_create；"
-            "配套的派生端是 vds.vds1.StorageNode1.create_from。"
-            "参见 demo/vds1_create_from.py。"
+            "本方案（§5.2 单生成元 SVC）不支持从已存文件派生新文件："
+            "缺少子向量知识论证所需的双生成元与双累加器结构。"
         )
