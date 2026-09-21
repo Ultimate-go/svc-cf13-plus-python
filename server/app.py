@@ -197,6 +197,152 @@ def estimate_ms(
     return 0.87 * max(nodes, 1) * commit
 
 
+# ---------------------------------------------------------------------------
+# 自动调参：按文件大小挑「跑得最快」的 block_bytes 与 n_max
+# ---------------------------------------------------------------------------
+#
+# 结论先说：**块数不是越少越好，块也不能太大**。
+#  - ``commit`` 的代价 ≈ ``a(bb) × n``：块越少，单块的指数越长，反而更贵；
+#    实测每字节代价随 bb 上升（bb=64 时因为素数涨到 513 位，直接贵 3~4 倍）。
+#  - ``distribute`` 的代价随块数增长，块越大越省。
+#  - 两者相加是一条**先降后升的 U 形曲线**，极小点在 bb ≈ 16~32 之间。
+#
+# ``n_max`` 则几乎不影响耗时：``PrimeGen`` 是惰性的，``e_[n_max]`` 也不会被
+# 提前算出来（实测 n_max 放大 4 倍，三个阶段耗时都不变）。所以它只需要
+# **正好等于块数** —— 既是素数表的真实容量，也不用多备。
+
+# 候选块大小（字节）。bb=4 是给极小文件留的，32 位素数绰绰有余；
+# 上界 64 对齐前端输入框，再大素数生成会失控（每素数 22 ms）。
+TUNE_LADDER: tuple[int, ...] = (4, 8, 12, 16, 24, 32, 48, 64)
+
+# 实测标定：bb -> (commit 毫秒/字节, distribute 毫秒/字节)
+# 条件 |N| = 512 位、k = 4 台、S = 4096 字节（见 _TUNE_REF_S）。
+# bb=4 由 bb≥8 的幂律外推（每字节 ~bb^0.24 / ~bb^-0.27）。
+_PER_BYTE_MS: dict[int, tuple[float, float]] = {
+    4:  (0.1030, 0.2900),
+    8:  (0.1151, 0.2501),
+    12: (0.1281, 0.2383),
+    16: (0.1322, 0.2119),
+    24: (0.1500, 0.1940),
+    32: (0.1597, 0.1763),
+    48: (0.1950, 0.1650),
+    64: (0.4471, 0.1562),
+}
+_TUNE_REF_S = 4096.0     # 标定用的文件大小
+_TUNE_REF_K = 4          # 标定用的服务器台数
+_TUNE_C_SUPER = 0.09     # commit 随文件增大的超线性指数（实测 4096→65536 放大 1.28×）
+_TUNE_D_SUPER = 0.15     # distribute 随文件增大的超线性指数（实测 4096→65536 放大 1.55×）
+_TUNE_INIT_MS = 80.0     # |N|=512 下的会话建立（模数生成）固定开销
+N_MAX_CAP = 65536        # n_max 硬上限，避免误传超大值
+
+
+def tune_for(nbytes: int, nodes: int = 4, modulus_bits: int = 512) -> dict:
+    """按文件字节数挑「预计总耗时最小」的 ``block_bytes``，并给出配套 ``n_max``。
+
+    :param nbytes: 文件（或文本框内容）的字节数，必须 > 0。
+    :param nodes: 打算用的服务器台数，参与 distribute 的代价估算。
+    :param modulus_bits: 模数位长，影响整体缩放。
+    :returns: 推荐参数 + 每个候选的估算耗时（便于前端展示「为什么选它」）。
+
+    ``n_max`` 一律取 ``ceil(nbytes / block_bytes)``，即**正好等于真实块数**：
+    实测它对耗时无影响，取最小值就够，也不会给用户一个用不上的大容量。
+
+    代价曲线在 bb ≈ 16~32 之间是**很平的 U 形底部**（实测相邻档总耗时差 <5%），
+    所以模型选出的档位与实测最优档可能差一档，这对「跑得最快」这个目标无所谓。
+    """
+    nbytes = max(1, int(nbytes))
+    nodes = max(1, int(nodes))
+    scale = (max(int(modulus_bits), 64) / 512.0) ** 1.72
+    size_ratio = nbytes / _TUNE_REF_S
+
+    scanned: list[dict] = []
+    for bb in TUNE_LADDER:
+        n = (nbytes + bb - 1) // bb          # ceil(nbytes / bb)
+        if n > N_MAX_CAP:
+            continue                          # 块数超出硬上限，这个 bb 不可用
+        c_per_byte, d_per_byte = _PER_BYTE_MS[bb]
+        est = (
+            _TUNE_INIT_MS
+            + nbytes * c_per_byte * size_ratio ** _TUNE_C_SUPER
+            + nbytes * d_per_byte * size_ratio ** _TUNE_D_SUPER
+            * (nodes / _TUNE_REF_K)
+        ) * scale
+        # 约束：每台服务器至少分到一块，否则演示里会有空服务器
+        # （n < nodes 时后端会把台数截断到 n，这里尽量避开这种退化情况）
+        feasible = n >= min(nodes, nbytes)
+        scanned.append(
+            {"block_bytes": bb, "n": n, "est_ms": est, "feasible": feasible}
+        )
+
+    if not scanned:
+        # 文件大到连 bb=64 都放不进 n_max 上限：只能取最大块，并如实告知
+        bb = TUNE_LADDER[-1]
+        n = (nbytes + bb - 1) // bb
+        return {
+            "ok": True,
+            "nbytes": nbytes,
+            "nodes": nodes,
+            "block_bytes": bb,
+            "n_max": min(n, N_MAX_CAP),
+            "n": n,
+            "est_ms": estimate_ms(min(n, N_MAX_CAP), bb * 8, modulus_bits,
+                                  nodes=nodes, kind="distribute"),
+            "feasible": False,
+            "scanned": [],
+            "reason": (
+                f"文件 {nbytes} 字节太大：即使用最大块 {bb} 字节也要 {n} 块，"
+                f"超过 n_max 上限 {N_MAX_CAP}。已按最大块下发，但可能很慢。"
+            ),
+        }
+
+    feasible_pool = [s for s in scanned if s["feasible"]]
+    if feasible_pool:
+        best = min(feasible_pool, key=lambda s: s["est_ms"])
+    else:
+        # 文件太小，连最小的候选块都凑不满 k 块 —— 那就取块数最多的那个，
+        # 让「分发到 k 台」这件事尽量成立（这种规模下耗时差异可以忽略）。
+        best = min(scanned, key=lambda s: (-s["n"], s["est_ms"]))
+    baseline = next((s for s in scanned if s["block_bytes"] == 16), best)
+
+    gain = ""
+    if baseline["block_bytes"] != best["block_bytes"] and baseline["est_ms"] > 0:
+        ratio = baseline["est_ms"] / max(best["est_ms"], 1e-9)
+        if ratio > 1.02:
+            gain = f"，比默认 16 字节（{baseline['n']} 块）快约 {(ratio - 1) * 100:.0f}%"
+
+    return {
+        "ok": True,
+        "nbytes": nbytes,
+        "nodes": nodes,
+        "block_bytes": best["block_bytes"],
+        "n": best["n"],
+        "n_max": best["n"],
+        "est_ms": best["est_ms"],
+        "feasible": best["feasible"],
+        "scanned": scanned,
+        "reason": (
+            f"{nbytes} 字节 ÷ 每块 {best['block_bytes']} 字节 → {best['n']} 块"
+            f"（l = {best['block_bytes'] * 8} 位）；"
+            f"在 {len(scanned)} 个候选块大小里估算总耗时最低 ≈ "
+            f"{best['est_ms'] / 1000:.1f} s{gain}。"
+            f"n max 取 {best['n']} —— 正好等于真实块数："
+            f"它只是素数表容量，实测对耗时无影响，取最小值即可。"
+        ),
+    }
+
+
+def op_tune(payload: dict) -> dict:
+    """``/api/tune``：给前端「上传文件后自动填参数」用，纯计算、不碰会话状态。"""
+    nbytes = int(payload.get("nbytes", 0))
+    if nbytes <= 0:
+        raise ValueError("nbytes 必须为正整数")
+    return tune_for(
+        nbytes,
+        nodes=int(payload.get("nodes", 4)),
+        modulus_bits=int(payload.get("modulus_bits", 512)),
+    )
+
+
 def _require_session() -> VDSSession:
     if STATE.session is None:
         raise RuntimeError("还没有建立会话，请先调用 /api/setup")
@@ -601,7 +747,15 @@ def op_attack(payload: dict) -> dict:
 
 
 def op_full(payload: dict) -> dict:
-    """一键跑完整条流水线，返回每一步的结果与耗时。"""
+    """一键跑完整条流水线，返回每一步的结果与耗时。
+
+    ``setup`` 只透传调用方**显式给出**的参数：不传就用 ``op_setup`` 自己的默认值，
+    免得这里再抄一份默认值，两边迟早会不一致。
+
+    ``commit`` 和单步调用一样支持两种内容来源 —— 传了 ``data_hex`` 就按上传文件的
+    原始字节切块，否则用 ``text``。之前这里写死了 ``text``，导致「选了文件再点一键」
+    实际承诺的还是默认文本，参数又是按文件大小调的 —— 两边对不上。
+    """
     steps = []
 
     def run(name: str, fn, arg=None):
@@ -617,7 +771,11 @@ def op_full(payload: dict) -> dict:
 
     run("setup", op_setup, {k: payload[k] for k in ("n_max", "block_bytes", "modulus_bits")
                             if k in payload})
-    run("commit", op_commit, {"text": payload.get("text", "Hello VDS")})
+    if payload.get("data_hex"):
+        commit_arg = {"data_hex": payload["data_hex"], "name": payload.get("name", "上传文件")}
+    else:
+        commit_arg = {"text": payload.get("text", "Hello VDS")}
+    run("commit", op_commit, commit_arg)
     run("distribute", op_distribute, {"nodes": payload.get("nodes", 4)})
     run("retrieve", op_retrieve, {})
     run("aggregate", op_aggregate, {})
@@ -662,6 +820,7 @@ def op_status(_: dict) -> dict:
 
 
 ROUTES = {
+    "/api/tune": op_tune,
     "/api/setup": op_setup,
     "/api/commit": op_commit,
     "/api/distribute": op_distribute,

@@ -23,7 +23,7 @@
     <h2>1 · 参数与文件内容</h2>
     <div class="grid">
       <label>最多块数 n&nbsp;max
-        <input id="n_max" type="number" value="16" min="1" max="4096">
+        <input id="n_max" type="number" value="16" min="1" max="65536">
       </label>
       <label>每块字节数
         <input id="block_bytes" type="number" value="16" min="1" max="64">
@@ -39,6 +39,7 @@
       <label>上传文件（按原始字节切块，二进制安全）
         <input id="file" type="file">
       </label>
+      <button id="btn-tune" type="button">⚙ 按大小自动调参</button>
       <button id="btn-clear-file" type="button">✕ 清除文件</button>
     </div>
     <p class="hint" id="file-info">—</p>
@@ -65,6 +66,12 @@
       提示：<strong>真正的块数 = ⌈文件字节数 ÷ 每块字节数⌉</strong>，
       「n max」只是素数表容量上限；「服务器台数」会被 <code>min(台数, 块数)</code> 截断。
       模数位长设小一点（512）能让演示快很多；真实安全强度需要 2048 位以上。
+    </p>
+    <p class="hint">
+      <strong>选中文件后会自动调参</strong>：后端按文件大小在若干候选块大小里挑
+      「跑得最快」的那一档，并把「n max」设成正好等于真实块数 —— 实测 n max
+      对耗时没有影响，取最小值就够。想手动覆盖直接改上面的输入框即可，
+      再点一次「⚙ 按大小自动调参」就能恢复自动值。
     </p>
   </section>
 

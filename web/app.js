@@ -612,6 +612,53 @@ function updateFileInfo() {
   el.classList.toggle("ok", !over);
 }
 
+/* ---- 按文件大小自动调参 ----
+ *
+ * 后端 /api/tune 会拿文件字节数在若干候选「每块字节数」里各估一遍总耗时，
+ * 挑最快的那一档；「n max」一律取 ⌈字节数 ÷ 每块字节数⌉，也就是真实块数
+ * —— 它只是素数表容量，实测对耗时没有影响，取最小值就够，不给用户一个用不上的大容量。
+ *
+ * 这里是「建议值」，自动填回输入框后用户想手动覆盖直接改就是了。
+ * 手动改过之后不会再被覆盖，除非重新选文件或再点一次自动调参。
+ */
+let tuneSeq = 0;   // 连选两个文件时，作废旧请求，避免旧响应盖掉新结果
+
+async function doTune(silent = false) {
+  const nbytes = inputBytes();
+  if (!nbytes) {
+    if (!silent) log("没有可调参的内容：请先上传文件，或在文本框里输入内容。", "bad");
+    return;
+  }
+  const seq = ++tuneSeq;
+  let r;
+  try {
+    r = await post("/api/tune", {
+      nbytes,
+      nodes: +$("n_nodes").value || 4,
+      modulus_bits: +$("modulus_bits").value || 512,
+    });
+  } catch (err) {
+    // 自动调参只是锦上添花：失败就保留原参数，不打断用户
+    if (!silent) log(`自动调参失败，已保留原参数：${err.message}`, "err");
+    return;
+  }
+  if (seq !== tuneSeq) return;   // 已经有更新的请求了，丢弃这次结果
+
+  $("block_bytes").value = r.block_bytes;
+  $("n_max").value = r.n_max;
+  updateFileInfo();
+
+  log(
+    `⚙ 自动调参：${r.nbytes} 字节 → 每块 ${r.block_bytes} 字节、${r.n} 块` +
+      `（n max = ${r.n_max}），估算总耗时 ≈ ${fmtDur(r.est_ms)}。` +
+      (r.feasible ? "" : "（块数不足服务器台数，分发会自动截断）"),
+    r.feasible ? "ok" : "bad"
+  );
+  log(`　 ${r.reason}`);
+}
+
+$("btn-tune").addEventListener("click", () => doTune(false));
+
 $("file").addEventListener("change", async (e) => {
   const f = e.target.files && e.target.files[0];
   if (!f) return;
@@ -619,12 +666,14 @@ $("file").addEventListener("change", async (e) => {
   state.fileName = f.name;
   updateFileInfo();
   log(`已选文件「${f.name}」，${fmtBytes(state.fileBytes.length)} —— 提交时按原始字节切块。`);
+  await doTune(true);   // 按文件大小自动挑最快的块大小 + 最小够用的 n max
 });
 
 $("btn-clear-file").addEventListener("click", () => {
   state.fileBytes = null;
   state.fileName = "";
   $("file").value = "";
+  tuneSeq++;            // 作废在途的调参请求，别让它回填到「文本框模式」
   updateFileInfo();
   log("已取消文件选择，改为使用文本框内容。");
 });
