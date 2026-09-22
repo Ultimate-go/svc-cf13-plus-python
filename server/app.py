@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import threading
 import time
@@ -198,10 +199,15 @@ def estimate_ms(
 
 
 # ---------------------------------------------------------------------------
-# 自动调参：按文件大小挑「跑得最快」的 block_bytes 与 n_max
+# 按文件大小算参数：block_bytes 与 n_max
 # ---------------------------------------------------------------------------
 #
-# 结论先说：**块数不是越少越好，块也不能太大**。
+# 两种用法（见 tune_for）：
+#   * **尊重调用方填的块大小** —— 块大小原样保留，只算块数
+#     n_max = ceil(字节数 / 每块字节数)。前端「按每块字节数算块数」按钮走这条。
+#   * **自动挑最快的一档** —— 调用方不给块大小时，在候选档里按估算耗时取最低。
+#
+# 下面这段是「怎么估耗时」的依据。结论先说：**块数不是越少越好，块也不能太大**。
 #  - ``commit`` 的代价 ≈ ``a(bb) × n``：块越少，单块的指数越长，反而更贵；
 #    实测每字节代价随 bb 上升（bb=64 时因为素数涨到 513 位，直接贵 3~4 倍）。
 #  - ``distribute`` 的代价随块数增长，块越大越省。
@@ -235,63 +241,195 @@ _TUNE_D_SUPER = 0.15     # distribute 随文件增大的超线性指数（实测
 _TUNE_INIT_MS = 80.0     # |N|=512 下的会话建立（模数生成）固定开销
 N_MAX_CAP = 65536        # n_max 硬上限，避免误传超大值
 
+BLOCK_BYTES_MIN = 1                      # 前端输入框 min
+BLOCK_BYTES_MAX = TUNE_LADDER[-1]        # 前端输入框 max（= 64）
 
-def tune_for(nbytes: int, nodes: int = 4, modulus_bits: int = 512) -> dict:
-    """按文件字节数挑「预计总耗时最小」的 ``block_bytes``，并给出配套 ``n_max``。
+
+def _per_byte_for(bb: int) -> tuple[float, float]:
+    """任意块大小 bb → ``(commit 毫秒/字节, distribute 毫秒/字节)``。
+
+    标定表只有 8 个档，而用户可以填任意块大小（输入框允许 1~64）。
+    直接在**双对数**空间做线性插值：实测每字节代价对 bb 近似幂律
+    （commit ≈ bb^0.24、distribute ≈ bb^-0.27），log-log 插值远比线性插值贴近。
+    超出标定范围就取最近的档 —— 8~64 之外的外推不可靠，clamp 比硬猜诚实。
+    """
+    keys = sorted(_PER_BYTE_MS)
+    if bb <= keys[0]:
+        return _PER_BYTE_MS[keys[0]]
+    if bb >= keys[-1]:
+        return _PER_BYTE_MS[keys[-1]]
+
+    lo = max(k for k in keys if k <= bb)
+    hi = min(k for k in keys if k >= bb)
+    if lo == hi:
+        return _PER_BYTE_MS[lo]
+
+    t = math.log(bb / lo) / math.log(hi / lo)
+    c0, d0 = _PER_BYTE_MS[lo]
+    c1, d1 = _PER_BYTE_MS[hi]
+
+    def mix(a: float, b: float) -> float:
+        return math.exp(math.log(a) + t * (math.log(b) - math.log(a)))
+
+    return mix(c0, c1), mix(d0, d1)
+
+
+def tune_for(
+    nbytes: int,
+    nodes: int = 4,
+    modulus_bits: int = 512,
+    block_bytes: int | None = None,
+) -> dict:
+    """按文件字节数给出配套的 ``block_bytes`` 与 ``n_max``，有两种模式。
+
+    **模式 A —— 尊重调用方指定的块大小**（``block_bytes`` 给出时）：
+    块大小原样保留，只按它算块数 ``n = ceil(nbytes / block_bytes)``。
+    前端「按每块字节数算块数」按钮走的就是这条路：用户自己决定每块多少字节，
+    本函数只负责把块数算对，**不替他改块大小**。顺带给出 ``suggestion``
+    （若换成估算最快的那一档大约能快多少）—— 仅作提示，不改变调用方的选择。
+
+    **模式 B —— 自动挑最快的一档**（``block_bytes`` 为 ``None``）：
+    在候选档里取估算总耗时最低的一档。
+
+    两种模式下 ``n_max`` 都取 ``ceil(nbytes / block_bytes)``，即**正好等于真实块数**：
+    实测它对耗时无影响，取最小值就够，也不会给用户一个用不上的大容量。
+
+    代价曲线在 bb ≈ 16~32 之间是**很平的 U 形底部**（实测相邻档总耗时差 <5%），
+    所以模式 B 选出的档位与实测最优档可能差一档，这对「跑得最快」这个目标无所谓。
 
     :param nbytes: 文件（或文本框内容）的字节数，必须 > 0。
     :param nodes: 打算用的服务器台数，参与 distribute 的代价估算。
     :param modulus_bits: 模数位长，影响整体缩放。
-    :returns: 推荐参数 + 每个候选的估算耗时（便于前端展示「为什么选它」）。
-
-    ``n_max`` 一律取 ``ceil(nbytes / block_bytes)``，即**正好等于真实块数**：
-    实测它对耗时无影响，取最小值就够，也不会给用户一个用不上的大容量。
-
-    代价曲线在 bb ≈ 16~32 之间是**很平的 U 形底部**（实测相邻档总耗时差 <5%），
-    所以模型选出的档位与实测最优档可能差一档，这对「跑得最快」这个目标无所谓。
+    :param block_bytes: 指定的块大小（``1~BLOCK_BYTES_MAX``）；``None`` 表示自动挑。
+    :raises ValueError: 给了 ``block_bytes`` 但不在允许范围内。
+    :returns: 参数 + 每个候选的估算耗时（便于前端展示「为什么选它」）。
     """
     nbytes = max(1, int(nbytes))
     nodes = max(1, int(nodes))
     scale = (max(int(modulus_bits), 64) / 512.0) ** 1.72
     size_ratio = nbytes / _TUNE_REF_S
 
-    scanned: list[dict] = []
-    for bb in TUNE_LADDER:
-        n = (nbytes + bb - 1) // bb          # ceil(nbytes / bb)
-        if n > N_MAX_CAP:
-            continue                          # 块数超出硬上限，这个 bb 不可用
-        c_per_byte, d_per_byte = _PER_BYTE_MS[bb]
-        est = (
+    def blocks_of(bb: int) -> int:
+        """定长切块的块数 ``ceil(nbytes / bb)``。"""
+        return (nbytes + bb - 1) // bb
+
+    def est_of(bb: int) -> float:
+        """该块大小下的估算总耗时（毫秒）。"""
+        c_per_byte, d_per_byte = _per_byte_for(bb)
+        return (
             _TUNE_INIT_MS
             + nbytes * c_per_byte * size_ratio ** _TUNE_C_SUPER
             + nbytes * d_per_byte * size_ratio ** _TUNE_D_SUPER
             * (nodes / _TUNE_REF_K)
         ) * scale
+
+    def candidate(bb: int) -> dict:
+        n = blocks_of(bb)
         # 约束：每台服务器至少分到一块，否则演示里会有空服务器
         # （n < nodes 时后端会把台数截断到 n，这里尽量避开这种退化情况）
-        feasible = n >= min(nodes, nbytes)
-        scanned.append(
-            {"block_bytes": bb, "n": n, "est_ms": est, "feasible": feasible}
-        )
+        return {
+            "block_bytes": bb,
+            "n": n,
+            "est_ms": est_of(bb),
+            "feasible": n >= min(nodes, nbytes),
+        }
 
-    if not scanned:
-        # 文件大到连 bb=64 都放不进 n_max 上限：只能取最大块，并如实告知
-        bb = TUNE_LADDER[-1]
-        n = (nbytes + bb - 1) // bb
+    # 候选表：块数突破 n_max 硬上限的档位不可用
+    scanned = [c for c in (candidate(bb) for bb in TUNE_LADDER) if c["n"] <= N_MAX_CAP]
+
+    def fastest() -> dict | None:
+        """候选里估算最快的那个（有可行的就只在可行里挑）。"""
+        pool = [c for c in scanned if c["feasible"]] or scanned
+        return min(pool, key=lambda c: c["est_ms"]) if pool else None
+
+    # ---------------------------------------------------------------- 模式 A
+    # 尊重调用方指定的块大小：只算块数，不改他的块大小。
+    if block_bytes is not None:
+        bb = int(block_bytes)
+        if not BLOCK_BYTES_MIN <= bb <= BLOCK_BYTES_MAX:
+            raise ValueError(
+                f"每块字节数必须在 {BLOCK_BYTES_MIN}~{BLOCK_BYTES_MAX} 之间，收到 {bb}"
+            )
+        n = blocks_of(bb)
+        est = est_of(bb)
+
+        # 「换成最快的一档能快多少」——只提示，不改变调用方的选择
+        suggestion = None
+        best = fastest()
+        if best is not None and best["block_bytes"] != bb:
+            ratio = est / max(best["est_ms"], 1e-9)
+            if ratio > 1.02:
+                suggestion = {
+                    "block_bytes": best["block_bytes"],
+                    "n": best["n"],
+                    "est_ms": best["est_ms"],
+                    "gain_pct": (ratio - 1) * 100.0,
+                }
+
+        # 块太小 → 块数会突破上限 → 建不了会话。如实说明，并算出最小的可用块大小。
+        need = -(-nbytes // N_MAX_CAP)          # ceil(nbytes / N_MAX_CAP)
+        over_cap = n > N_MAX_CAP
+        reason = (
+            f"按你指定的每块 {bb} 字节：{nbytes} 字节 → {n} 块"
+            f"（l = {bb * 8} 位），估算总耗时 ≈ {est / 1000:.1f} s。"
+            f"n max 取 {n} —— 正好等于真实块数。"
+        )
+        if over_cap:
+            reason = (
+                f"{nbytes} 字节 ÷ 每块 {bb} 字节 → 需要 {n} 块，"
+                f"超过 n max 上限 {N_MAX_CAP}，建不了会话。"
+                f"请把每块字节数调到至少 {need} 字节。"
+            )
+        elif suggestion is not None:
+            reason += (
+                f"提示：若把每块改成 {suggestion['block_bytes']} 字节"
+                f"（{suggestion['n']} 块）估算约快 {suggestion['gain_pct']:.0f}%。"
+            )
+
         return {
             "ok": True,
             "nbytes": nbytes,
             "nodes": nodes,
+            "requested_block_bytes": bb,
             "block_bytes": bb,
-            "n_max": min(n, N_MAX_CAP),
             "n": n,
-            "est_ms": estimate_ms(min(n, N_MAX_CAP), bb * 8, modulus_bits,
-                                  nodes=nodes, kind="distribute"),
+            "n_max": n if not over_cap else N_MAX_CAP,
+            "est_ms": est,
+            "feasible": (n >= min(nodes, nbytes)) and not over_cap,
+            "over_cap": over_cap,
+            "min_block_bytes": need if over_cap else None,
+            "suggestion": suggestion,
+            "scanned": scanned,
+            "reason": reason,
+        }
+
+    # ---------------------------------------------------------------- 模式 B
+    # 自动挑「估算总耗时最低」的一档。
+    if not scanned:
+        # 文件大到连 bb=64 都放不进 n_max 上限 —— 没有任何块大小能救它，
+        # 所以**不能**给一个「把每块调到 N 字节」的建议，那样用户照做也仍然跑不起来。
+        # （走到这里必然 ceil(nbytes / N_MAX_CAP) > BLOCK_BYTES_MAX，所以直接置 None。）
+        bb = TUNE_LADDER[-1]
+        n = blocks_of(bb)
+        return {
+            "ok": True,
+            "nbytes": nbytes,
+            "nodes": nodes,
+            "requested_block_bytes": None,
+            "block_bytes": bb,
+            "n": n,
+            "n_max": N_MAX_CAP,                 # 只能给到上限（真实需要 n 块）
+            "est_ms": est_of(bb),
             "feasible": False,
+            "over_cap": True,
+            # 连最大块都救不了时不给数字 —— 给一个做不到的建议比不给更糟
+            "min_block_bytes": None,
+            "suggestion": None,
             "scanned": [],
             "reason": (
                 f"文件 {nbytes} 字节太大：即使用最大块 {bb} 字节也要 {n} 块，"
-                f"超过 n_max 上限 {N_MAX_CAP}。已按最大块下发，但可能很慢。"
+                f"超过 n max 上限 {N_MAX_CAP}。本演示跑不动这么大的文件，"
+                f"请换小一点的文件（上限约 {N_MAX_CAP * BLOCK_BYTES_MAX // (1 << 20)} MB）。"
             ),
         }
 
@@ -314,11 +452,15 @@ def tune_for(nbytes: int, nodes: int = 4, modulus_bits: int = 512) -> dict:
         "ok": True,
         "nbytes": nbytes,
         "nodes": nodes,
+        "requested_block_bytes": None,
         "block_bytes": best["block_bytes"],
         "n": best["n"],
         "n_max": best["n"],
         "est_ms": best["est_ms"],
         "feasible": best["feasible"],
+        "over_cap": False,
+        "min_block_bytes": None,
+        "suggestion": None,
         "scanned": scanned,
         "reason": (
             f"{nbytes} 字节 ÷ 每块 {best['block_bytes']} 字节 → {best['n']} 块"
@@ -332,14 +474,20 @@ def tune_for(nbytes: int, nodes: int = 4, modulus_bits: int = 512) -> dict:
 
 
 def op_tune(payload: dict) -> dict:
-    """``/api/tune``：给前端「上传文件后自动填参数」用，纯计算、不碰会话状态。"""
+    """``/api/tune``：给前端「算参数」用，纯计算、不碰会话状态。
+
+    * 传了 ``block_bytes`` → **尊重它**，只按它算块数（前端按钮走这条）；
+    * 不传 ``block_bytes`` → 自动挑估算最快的一档。
+    """
     nbytes = int(payload.get("nbytes", 0))
     if nbytes <= 0:
         raise ValueError("nbytes 必须为正整数")
+    bb = payload.get("block_bytes")
     return tune_for(
         nbytes,
         nodes=int(payload.get("nodes", 4)),
         modulus_bits=int(payload.get("modulus_bits", 512)),
+        block_bytes=None if bb is None or bb == "" else int(bb),
     )
 
 

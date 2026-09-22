@@ -39,7 +39,8 @@
       <label>上传文件（按原始字节切块，二进制安全）
         <input id="file" type="file">
       </label>
-      <button id="btn-tune" type="button">⚙ 按大小自动调参</button>
+      <button id="btn-tune" type="button">⚙ 按每块字节数算块数</button>
+      <button id="btn-autotune" type="button">⚡ 自动挑最快块大小</button>
       <button id="btn-clear-file" type="button">✕ 清除文件</button>
     </div>
     <p class="hint" id="file-info">—</p>
@@ -68,10 +69,22 @@
       模数位长设小一点（512）能让演示快很多；真实安全强度需要 2048 位以上。
     </p>
     <p class="hint">
-      <strong>选中文件后会自动调参</strong>：后端按文件大小在若干候选块大小里挑
-      「跑得最快」的那一档，并把「n max」设成正好等于真实块数 —— 实测 n max
-      对耗时没有影响，取最小值就够。想手动覆盖直接改上面的输入框即可，
-      再点一次「⚙ 按大小自动调参」就能恢复自动值。
+      两个按钮，各管一件事 —— 都只改<strong>块数参数</strong>，不动你的文件内容：
+    </p>
+    <p class="hint">
+      <strong>⚙ 按每块字节数算块数</strong>（选中文件时也会自动算一次）：按
+      <code>n max = ⌈字节数 ÷ 每块字节数⌉</code> 算成正好等于真实块数，
+      <strong>不改动你填的每块字节数</strong>。若换成别的块大小能明显更快，日志里提示一句，
+      采纳与否由你决定。
+    </p>
+    <p class="hint">
+      <strong>⚡ 自动挑最快块大小</strong>：在 4/8/12/…/64 这些候选块大小里，
+      按实测代价模型估一遍总耗时，挑最快的一档，并把「每块字节数」和「n max」
+      都填好 —— 相当于替你做了上面那个选择。
+    </p>
+    <p class="hint">
+      两个按钮里「n max」都取「正好够用」的最小值：块数只是素数表容量，
+      实测对耗时没有影响，多备是浪费。块数超过上限时也会提示该把每块调到多少。
     </p>
   </section>
 

@@ -13,9 +13,19 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
-from server.app import N_MAX_CAP, TUNE_LADDER, tune_for, op_tune
+from server.app import (
+    BLOCK_BYTES_MAX,
+    N_MAX_CAP,
+    TUNE_LADDER,
+    _PER_BYTE_MS,
+    _per_byte_for,
+    op_tune,
+    tune_for,
+)
 
 
 #: 覆盖极小 / 常规 / 较大 / 超大四类规模
@@ -102,6 +112,25 @@ class TestTuneFor:
         assert r["feasible"] is False
         assert "上限" in r["reason"]
 
+    def test_没有可用块大小时不给做不到的建议(self):
+        """连最大块都救不了 → 不能给「把每块调到 N 字节」，那样用户照做仍然跑不起来。
+
+        这个分支里 ceil(nbytes / N_MAX_CAP) 必然 > 64，所以只能置 None，
+        并在 reason 里改说「换小一点的文件」。
+        """
+        nbytes = N_MAX_CAP * BLOCK_BYTES_MAX + 1
+        r = tune_for(nbytes)
+        assert r["over_cap"] is True
+        assert r["feasible"] is False
+        assert r["min_block_bytes"] is None
+        assert "小一点的文件" in r["reason"], "要给一条真能执行的出路"
+
+    def test_刚好放得下时不给降级(self):
+        """边界另一侧：正好等于上限容量，应当能正常给出方案。"""
+        r = tune_for(N_MAX_CAP * BLOCK_BYTES_MAX)
+        assert r["over_cap"] is False
+        assert r["n"] == r["n_max"] == N_MAX_CAP
+
     def test_n_max_永不超硬上限(self):
         for nbytes in (1, 4096, 1 << 20, N_MAX_CAP * 64 + 5):
             assert tune_for(nbytes)["n_max"] <= N_MAX_CAP
@@ -134,3 +163,126 @@ class TestOpTune:
         r = op_tune({"nbytes": 65536, "nodes": 8, "modulus_bits": 1024})
         assert r["nodes"] == 8
         assert r["n_max"] == r["n"]
+
+    def test_透传块大小(self):
+        """前端「按每块字节数算块数」按钮走的就是这条：把用户填的块大小透传进来。"""
+        r = op_tune({"nbytes": 20000, "block_bytes": 20})
+        assert r["requested_block_bytes"] == 20
+        assert r["block_bytes"] == 20, "不能把用户填的块大小换成「最快的那档」"
+        assert r["n_max"] == math.ceil(20000 / 20)
+
+    def test_块大小给空串等于没给(self):
+        """前端输入框可能被清空 —— 空串应当走自动挑，而不是报错。"""
+        assert op_tune({"nbytes": 4096, "block_bytes": ""}) == op_tune({"nbytes": 4096})
+        assert op_tune({"nbytes": 4096, "block_bytes": None}) == op_tune({"nbytes": 4096})
+
+    def test_非法块大小报错(self):
+        for bad in (0, -3, BLOCK_BYTES_MAX + 1):
+            with pytest.raises(ValueError):
+                op_tune({"nbytes": 4096, "block_bytes": bad})
+
+
+class Test指定块大小:
+    """模式 A：尊重调用方填的每块字节数，只按它算块数。
+
+    这是「不要替我挑块大小，我自己填，你只管把块数算对」这条需求的核心 ——
+    无论用户填的是标定档还是任意值，块大小都必须原样保留。
+    """
+
+    @pytest.mark.parametrize("nbytes", SIZES)
+    @pytest.mark.parametrize("bb", [1, 4, 7, 16, 20, 32, 64])
+    def test_块大小原样保留(self, nbytes, bb):
+        r = tune_for(nbytes, block_bytes=bb)
+        assert r["block_bytes"] == bb, "用户填的块大小必须原样保留"
+        assert r["requested_block_bytes"] == bb
+
+    @pytest.mark.parametrize("nbytes", SIZES)
+    @pytest.mark.parametrize("bb", [1, 4, 7, 16, 20, 32, 64])
+    def test_n_max_就是按该块大小切出的块数(self, nbytes, bb):
+        r = tune_for(nbytes, block_bytes=bb)
+        expect = math.ceil(nbytes / bb)
+        assert r["n"] == expect
+        assert r["n_max"] == min(expect, N_MAX_CAP)
+
+    @pytest.mark.parametrize("nbytes", SIZES)
+    @pytest.mark.parametrize("bb", [1, 4, 7, 16, 20, 32, 64])
+    def test_切块不丢数据(self, nbytes, bb):
+        r = tune_for(nbytes, block_bytes=bb)
+        assert r["n"] * bb >= nbytes, "块数不足会把尾块截断 —— 静默丢数据"
+        assert (r["n"] - 1) * bb < nbytes, "块数多算一块会凭空多出空块"
+
+    def test_大文件配小块会如实报超上限(self):
+        """块太小 → 块数突破上限 → 建不了会话。必须报出来，并给出最小的可用块大小。"""
+        nbytes, bb = 2_000_000, 16
+        r = tune_for(nbytes, block_bytes=bb)
+        assert r["over_cap"] is True
+        assert r["feasible"] is False
+        assert r["n"] == math.ceil(nbytes / bb) > N_MAX_CAP
+        assert r["n_max"] == N_MAX_CAP, "给不出超过上限的容量，只能给到上限"
+        assert r["min_block_bytes"] == math.ceil(nbytes / N_MAX_CAP)
+        assert str(r["min_block_bytes"]) in r["reason"], "提示里要有可操作的数字"
+
+    @pytest.mark.parametrize("nbytes", [1, 64, 4096, 65536])
+    def test_没超上限就不报超上限(self, nbytes):
+        r = tune_for(nbytes, block_bytes=64)
+        assert r["over_cap"] is False
+        assert r["min_block_bytes"] is None
+
+    def test_更快的档只作提示不覆盖用户选择(self):
+        r = tune_for(20000, block_bytes=8)
+        assert r["block_bytes"] == 8, "即使用户选的不是最快档，也不能替他改"
+        assert r["suggestion"] is not None
+        assert r["suggestion"]["est_ms"] < r["est_ms"]
+        assert r["suggestion"]["block_bytes"] != 8
+        assert r["suggestion"]["gain_pct"] > 0
+
+    def test_已经是最快档时不给提示(self):
+        fastest = tune_for(20000)["block_bytes"]   # 先问自动模式挑的是哪一档
+        r = tune_for(20000, block_bytes=fastest)
+        assert r["suggestion"] is None
+
+    def test_非法块大小报错(self):
+        for bad in (0, -1, BLOCK_BYTES_MAX + 1, 1000):
+            with pytest.raises(ValueError):
+                tune_for(4096, block_bytes=bad)
+
+
+class Test每字节代价插值:
+    """标定表只有 8 档，但用户能填 1~64 任意值，所以要能给任意 bb 估耗时。"""
+
+    @pytest.mark.parametrize("bb", sorted(_PER_BYTE_MS))
+    def test_标定档不被插值扰动(self, bb):
+        """标定过的档必须原样返回 —— 插值绝不能动到实测值本身。"""
+        assert _per_byte_for(bb) == _PER_BYTE_MS[bb]
+
+    @pytest.mark.parametrize("bb", range(5, 64))
+    def test_插值落在相邻标定档之间(self, bb):
+        """log-log 插值的硬性质：两个分量都落在左右两档之间，不会外冲出界。"""
+        keys = sorted(_PER_BYTE_MS)
+        lo = max(k for k in keys if k <= bb)
+        hi = min(k for k in keys if k >= bb)
+        c, d = _per_byte_for(bb)
+        c0, d0 = _PER_BYTE_MS[lo]
+        c1, d1 = _PER_BYTE_MS[hi]
+        assert min(c0, c1) - 1e-12 <= c <= max(c0, c1) + 1e-12
+        assert min(d0, d1) - 1e-12 <= d <= max(d0, d1) + 1e-12
+
+    def test_超出标定范围取最近的档(self):
+        for bb in (1, 2, 3):
+            assert _per_byte_for(bb) == _PER_BYTE_MS[4]
+        assert _per_byte_for(64) == _PER_BYTE_MS[64]
+        assert _per_byte_for(200) == _PER_BYTE_MS[64]
+
+    def test_相邻块大小的估值不会突然跳变(self):
+        """1~48 之间应当平滑。
+
+        48→64 有一次**真实**跳变（素数从 385 位涨到 513 位，实测每字节代价翻倍），
+        那是标定表里的真实数据、不是插值缺陷，所以这段被排除在外。
+        """
+        prev = None
+        for bb in range(4, 49):
+            est = tune_for(20000, block_bytes=bb)["est_ms"]
+            if prev is not None:
+                ratio = max(est, prev) / min(est, prev)
+                assert ratio < 1.15, f"bb={bb} 相比上一档跳变 {ratio:.2f}×"
+            prev = est

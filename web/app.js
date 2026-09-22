@@ -598,66 +598,119 @@ function updateFileInfo() {
   const el = $("file-info");
   const bb = +$("block_bytes").value || 1;
   const nm = +$("n_max").value || 1;
-  if (!state.fileBytes) {
-    el.textContent = `未选文件 —— 将使用文本框内容（${fmtBytes(inputBytes())}）`;
+  const bytes = inputBytes();   // 选了文件用文件字节数，否则用文本框的 UTF-8 长度
+
+  if (!bytes) {
+    el.textContent = "还没有内容 —— 上传一个文件，或在下面的文本框里输入";
     el.classList.remove("ok", "err");
     return;
   }
-  const n = Math.ceil(state.fileBytes.length / bb);
+
+  // ★ 块数是跟着「每块字节数」实时算的，两种来源都算 ——
+  //   之前只对「选了文件」算，文本框输入时看不到块数变化。
+  const n = Math.ceil(bytes / bb);
   const over = n > nm;
+  const src = state.fileBytes
+    ? `${state.fileName} · ${fmtBytes(bytes)}`
+    : `文本框内容 · ${fmtBytes(bytes)}`;
   el.textContent =
-    `${state.fileName} · ${fmtBytes(state.fileBytes.length)} → 切成 ${n} 块` +
+    `${src} ÷ 每块 ${bb} 字节 → 切成 ${n} 块` +
     (over ? `；超过 n max = ${nm}，请把 n max 调大` : `（n max = ${nm}）`);
   el.classList.toggle("err", over);
   el.classList.toggle("ok", !over);
 }
 
-/* ---- 按文件大小自动调参 ----
+/* ---- 两个按钮：算块数 / 自动挑块大小 ----
  *
- * 后端 /api/tune 会拿文件字节数在若干候选「每块字节数」里各估一遍总耗时，
- * 挑最快的那一档；「n max」一律取 ⌈字节数 ÷ 每块字节数⌉，也就是真实块数
- * —— 它只是素数表容量，实测对耗时没有影响，取最小值就够，不给用户一个用不上的大容量。
+ * 两者都只是「把参数填好」，不碰文件内容：
  *
- * 这里是「建议值」，自动填回输入框后用户想手动覆盖直接改就是了。
- * 手动改过之后不会再被覆盖，除非重新选文件或再点一次自动调参。
+ *   ① 「按每块字节数算块数」—— 块大小用你填的，只算块数：
+ *        n max = ⌈字节数 ÷ 每块字节数⌉
+ *      若换成别的块大小能明显更快，日志里只提示一句，**绝不替你改输入框**。
+ *
+ *   ② 「自动挑最快块大小」—— 在候选档里按实测代价模型挑估算总耗时最低的一档，
+ *      连「每块字节数」一起填好，相当于替你做完了 ① 里那个选择。
+ *
+ * 两种模式共用同一个后端接口：带上 block_bytes 就是模式 ①，不带就是模式 ②
+ * （对应后端 tune_for 的两种模式）。
+ * 块数一律取「正好够用」的最小值 —— 它是定长切块的真实块数（尾块补零对齐），
+ * 实测 n max 对耗时没有影响，多备纯属浪费。
  */
 let tuneSeq = 0;   // 连选两个文件时，作废旧请求，避免旧响应盖掉新结果
 
-async function doTune(silent = false) {
+/**
+ * @param {boolean} auto   true = 自动挑最快块大小（会写回「每块字节数」）；
+ *                         false = 只用你填的块大小算块数（不动它）
+ * @param {boolean} silent true = 后台自动触发，没有内容时安静返回
+ */
+async function doTune(auto, silent = false) {
   const nbytes = inputBytes();
   if (!nbytes) {
-    if (!silent) log("没有可调参的内容：请先上传文件，或在文本框里输入内容。", "bad");
+    if (!silent) log("还没有内容：请先上传文件，或在文本框里输入内容。", "bad");
     return;
   }
+  const body = {
+    nbytes,
+    nodes: +$("n_nodes").value || 4,
+    modulus_bits: +$("modulus_bits").value || 512,
+  };
+  if (!auto) body.block_bytes = +$("block_bytes").value;   // 模式 ①：块大小由你定
   const seq = ++tuneSeq;
   let r;
   try {
-    r = await post("/api/tune", {
-      nbytes,
-      nodes: +$("n_nodes").value || 4,
-      modulus_bits: +$("modulus_bits").value || 512,
-    });
+    r = await post("/api/tune", body);
   } catch (err) {
-    // 自动调参只是锦上添花：失败就保留原参数，不打断用户
-    if (!silent) log(`自动调参失败，已保留原参数：${err.message}`, "err");
+    if (!silent) log(`算参数失败，已保留原参数：${err.message}`, "err");
     return;
   }
   if (seq !== tuneSeq) return;   // 已经有更新的请求了，丢弃这次结果
+
+  // 块数突破上限 → 建不了会话。不能默默改个数，要说清怎么办。
+  // （连 silent 也要提示：这是可操作的错误，吞掉等于让用户白等一次失败）
+  if (r.over_cap) {
+    const head = auto
+      ? `已用最大的每块 ${r.block_bytes} 字节，仍需要`
+      : `每块 ${r.block_bytes} 字节太小，需要`;
+    const hint = r.min_block_bytes
+      ? `请把「每块字节数」调到至少 ${r.min_block_bytes} 字节。`
+      : "本演示跑不动这么大的文件，请换小一点的文件。";
+    log(
+      `${head} ${r.n} 块，超过 n max 的硬上限 ${r.n_max}，建不了会话。${hint}`,
+      "err"
+    );
+    return;
+  }
 
   $("block_bytes").value = r.block_bytes;
   $("n_max").value = r.n_max;
   updateFileInfo();
 
-  log(
-    `⚙ 自动调参：${r.nbytes} 字节 → 每块 ${r.block_bytes} 字节、${r.n} 块` +
-      `（n max = ${r.n_max}），估算总耗时 ≈ ${fmtDur(r.est_ms)}。` +
-      (r.feasible ? "" : "（块数不足服务器台数，分发会自动截断）"),
-    r.feasible ? "ok" : "bad"
-  );
-  log(`　 ${r.reason}`);
+  const feas = r.feasible ? "" : "；块数少于服务器台数，分发会自动截断";
+  if (auto) {
+    log(
+      `⚡ 自动挑到每块 ${r.block_bytes} 字节 → ${fmtBytes(r.nbytes)} 切成 ${r.n} 块` +
+        `（每块字节数与 n max 都已填好），估算总耗时 ≈ ${fmtDur(r.est_ms)}${feas}`,
+      r.feasible ? "ok" : "bad"
+    );
+    log(`　 ${r.reason}`);
+  } else {
+    log(
+      `⚙ 按你填的每块 ${r.block_bytes} 字节 → ${fmtBytes(r.nbytes)} 切成 ${r.n} 块` +
+        `（n max 已设为 ${r.n_max}），估算总耗时 ≈ ${fmtDur(r.est_ms)}${feas}`,
+      r.feasible ? "ok" : "bad"
+    );
+    if (r.suggestion) {
+      log(
+        `　 提示：每块改成 ${r.suggestion.block_bytes} 字节` +
+          `（${r.suggestion.n} 块）估算约快 ${r.suggestion.gain_pct.toFixed(0)}%` +
+          ` —— 想用就点「⚡ 自动挑最快块大小」，或自己改输入框。`
+      );
+    }
+  }
 }
 
 $("btn-tune").addEventListener("click", () => doTune(false));
+$("btn-autotune").addEventListener("click", () => doTune(true));
 
 $("file").addEventListener("change", async (e) => {
   const f = e.target.files && e.target.files[0];
@@ -666,14 +719,16 @@ $("file").addEventListener("change", async (e) => {
   state.fileName = f.name;
   updateFileInfo();
   log(`已选文件「${f.name}」，${fmtBytes(state.fileBytes.length)} —— 提交时按原始字节切块。`);
-  await doTune(true);   // 按文件大小自动挑最快的块大小 + 最小够用的 n max
+  // 选文件只「按你填的块大小算块数」，**不**替你改块大小 ——
+  // 想让它自动挑最快档，点「⚡ 自动挑最快块大小」。
+  await doTune(false, true);
 });
 
 $("btn-clear-file").addEventListener("click", () => {
   state.fileBytes = null;
   state.fileName = "";
   $("file").value = "";
-  tuneSeq++;            // 作废在途的调参请求，别让它回填到「文本框模式」
+  tuneSeq++;            // 作废在途的请求，别让它回填到「文本框模式」
   updateFileInfo();
   log("已取消文件选择，改为使用文本框内容。");
 });
