@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -172,3 +173,162 @@
 <script src="app.js"></script>
 </body>
 </html>
+=======
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>可验证分布式存储 · VDS 方案演示（论文 §5.2 / §8.2）</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>可验证分布式存储 <span class="sub">VDS · 论文 §5.2 / §8.2</span></h1>
+  <p class="lede">
+    一个文件被切成若干块，存在不同的服务器上。任何人可以检索文件的若干部分，
+    服务器返回<strong>内容</strong>与<strong>相应证据</strong>；
+    把多个证据<strong>聚合成一个</strong>，
+    用户只验证这一个证据，就能确认<strong>所有</strong>检索内容的完整性。
+  </p>
+</header>
+
+<main>
+  <!-- ================= 控制区 ================= -->
+  <section class="panel">
+    <h2>1 · 参数与文件内容</h2>
+    <div class="grid">
+      <label>最多块数 n&nbsp;max
+        <input id="n_max" type="number" value="16" min="1" max="4096">
+      </label>
+      <label>每块字节数
+        <input id="block_bytes" type="number" value="16" min="1" max="64">
+      </label>
+      <label>模数位长 |N|
+        <input id="modulus_bits" type="number" value="512" min="64" step="64">
+      </label>
+      <label>服务器台数
+        <input id="n_nodes" type="number" value="4" min="1" max="16">
+      </label>
+    </div>
+    <div class="filerow">
+      <label>上传文件（按原始字节切块，二进制安全）
+        <input id="file" type="file">
+      </label>
+      <button id="btn-clear-file" type="button">✕ 清除文件</button>
+    </div>
+    <p class="hint" id="file-info">—</p>
+    <label class="full">文件内容（不选文件时用它）
+      <textarea id="text" rows="3" placeholder="在这里输入任意文本；或直接上传一个文件。"></textarea>
+    </label>
+    <div class="actions">
+      <button id="btn-full" class="primary">▶ 一键跑完整流程</button>
+      <span class="sep"></span>
+      <button id="btn-setup">① 建立会话</button>
+      <button id="btn-commit">② 切块并承诺</button>
+      <button id="btn-distribute">③ 分发到服务器</button>
+      <button id="btn-retrieve">④ 检索若干部分</button>
+      <button id="btn-aggregate">⑤ 聚合成一个证据</button>
+      <button id="btn-verify">⑥ 验证这一个证据</button>
+      <span class="sep"></span>
+      <button id="btn-expand">⤢ 展开全部完整值</button>
+      <span class="sep"></span>
+      <button id="btn-tamper" class="danger">☠ 让服务器篡改内容</button>
+      <button id="btn-forge" class="danger">☠ 让服务器伪造证据</button>
+      <button id="btn-reset">重置</button>
+    </div>
+    <p class="hint" id="hint">
+      提示：<strong>真正的块数 = ⌈文件字节数 ÷ 每块字节数⌉</strong>，
+      「n max」只是素数表容量上限；「服务器台数」会被 <code>min(台数, 块数)</code> 截断。
+      模数位长设小一点（512）能让演示快很多；真实安全强度需要 2048 位以上。
+    </p>
+  </section>
+
+  <!-- ================= 进度 ================= -->
+  <section class="panel" id="panel-progress" hidden>
+    <h2>执行中</h2>
+    <div class="prog">
+      <div class="prog-head">
+        <span id="prog-phase">—</span>
+        <span id="prog-time" class="mono">0.0 s</span>
+      </div>
+      <div class="prog-track"><div class="prog-fill" id="prog-fill"></div></div>
+      <div class="prog-sub" id="prog-sub">—</div>
+    </div>
+    <p class="hint">
+      进度来自后端真实的分步子步骤（分发阶段按服务器台数推进）；
+      「预计」是按实测代价模型拟合的参考值，可能偏差 ±30%。
+    </p>
+  </section>
+
+  <!-- ================= 摘要 ================= -->
+  <section class="panel" id="panel-digest" hidden>
+    <h2>2 · 客户端手里的全部信息 = 一个摘要 δ</h2>
+    <div class="digest">
+      <div class="cell"><span class="k">n（块数）</span><span class="v" id="d-n">—</span></div>
+      <div class="cell"><span class="k">U = g<sup>e_[n]</sup></span><span class="v mono" id="d-U">—</span></div>
+      <div class="cell"><span class="k">C（承诺）</span><span class="v mono" id="d-C">—</span></div>
+    </div>
+    <p class="hint">
+      摘要的大小与文件长度<strong>无关</strong>：永远是两个群元素加一个整数。
+      客户端只保存这三样东西。
+    </p>
+    <p class="hint">
+      数值默认只显示指纹，<strong>点击任意指纹</strong>即可展开完整值
+      （512 位群元素 = 130 个十六进制字符），点旁边的 <code>⧉</code> 复制。
+      也可以点控制区的「⤢ 展开全部完整值」一次看全部。
+    </p>
+  </section>
+
+  <!-- ================= 服务器 ================= -->
+  <section class="panel" id="panel-nodes" hidden>
+    <h2>3 · 存储服务器（各自持有文件的一部分 + 一个证据）</h2>
+    <div class="nodes" id="nodes"></div>
+    <p class="hint">
+      每张卡片上的「本地视图」检查就是 <code>svc.verify</code> 的两个步骤：
+      S<sub>I</sub><sup>e_I</sup> = U 且 Λ<sub>I</sub><sup>e_I</sup>·∏S<sub>i</sub><sup>F_i</sup> = C。
+      任何一台偷偷丢数据或改数据的服务器，都会在这里露馅。
+    </p>
+  </section>
+
+  <!-- ================= 检索 / 聚合 / 验证 ================= -->
+  <section class="panel" id="panel-flow" hidden>
+    <h2>4 · 检索 → 聚合 → 验证</h2>
+    <div class="flow">
+      <div class="flowbox" id="box-certs">
+        <h3>检索到的证据</h3>
+        <div id="certs-list" class="mini">—</div>
+      </div>
+      <div class="arrow">聚合 ➜</div>
+      <div class="flowbox" id="box-merged">
+        <h3>聚合后的唯一证据 π<sub>K</sub></h3>
+        <div id="merged-body" class="mini">—</div>
+      </div>
+      <div class="arrow">验证 ➜</div>
+      <div class="flowbox" id="box-verify">
+        <h3>客户端验证结果</h3>
+        <div id="verify-body" class="mini">—</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 日志 ================= -->
+  <section class="panel">
+    <h2>执行日志</h2>
+    <div class="log" id="log"></div>
+  </section>
+</main>
+
+<footer>
+  <p>
+    实现依据：ASIACRYPT 2020,
+    <em>Incrementally Aggregatable Vector Commitments and Applications to Verifiable Decentralized Storage</em>，
+    §5.2 + §8.2，以及附录 D.1（存储证明）。
+    纯 Python、零第三方依赖，测试见 <code>tests/</code>。
+  </p>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
+>>>>>>> main
