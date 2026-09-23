@@ -4,18 +4,49 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "python-svc-v1"
-version = "1.0.0"
+dynamic = ["version"]
 description = "第二个 SVC 方案（ASIACRYPT 2020, §5.2）与可验证分布式存储（§8.2）的纯 Python 实现"
 requires-python = ">=3.10"
 dependencies = []
 
 [project.optional-dependencies]
-# 只给 Web 演示用；核心算法零依赖
-web = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
+# 核心算法与 Web 演示都只用标准库（演示后端是 http.server，不是 FastAPI），
+# 所以没有 web 依赖组；测试是唯一的外部依赖，核心仍保持零依赖。
 dev = ["pytest>=8"]
 
 [tool.setuptools]
+# 只分发两个算法包。server/（演示后端）与 web/（静态页面）**不在包内**：
+# 演示请克隆仓库后 ``python server/app.py`` 从源码运行（见 README）。
 packages = ["svc", "vds"]
+
+[tool.setuptools.dynamic]
+# 版本号单一来源：只写在 svc/__init__.py 的 __version__ 里，打包时读它。
+version = {attr = "svc.__version__"}
+
+[tool.ruff]
+# ruff 各版本的「默认规则集」会变（本仓库实测 0.15 给 62 项、0.16 给 184 项），
+# 所以这里**显式**写死 select —— CI 的结论才不会被一次 ruff 升级悄悄改掉。
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+# 沿用 ruff 的历史默认集：
+#   E4  import 相关 / E7 歧义名 / E9 语法级 / F pyflakes
+select = ["E4", "E7", "E9", "F"]
+
+ignore = [
+    # E741「变量名像 l / I / O」、E743「函数名像 l / I / O」。
+    #
+    # 这些名字不是随手起的，而是**论文正文的记号**：
+    #   l            —— 每个数据块的比特数（全篇）；l_H 是块哈希的比特数
+    #   I, J, K, Q   —— 下标集合（I 是本地持有集合，Q 是某次检索请求）
+    #   O            —— 论文里表示复杂度的 O(·) 出现在注释中
+    # 改名（比如 I → indices）会让代码与论文对不上号，而「能对着论文读代码」
+    # 正是这个项目存在的意义。所以全仓库（svc / vds / tests / bench / server）
+    # 一致放行，不在个别目录开后门。
+    "E741",
+    "E743",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

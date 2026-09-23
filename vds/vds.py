@@ -28,6 +28,7 @@ from svc import (
     Opening,
     PrimeGen,
     commit as svc_commit,
+    disagg,
     open_subvector,
     product_tree,
     setup as svc_setup,
@@ -37,10 +38,61 @@ from svc.types import as_index_set
 
 from .client_node import Certificate, ClientNode
 from .digest import Digest, LocalView
-from .encoding import blocks_for_length, split_bytes
+from .encoding import split_bytes
 from .storage_node import StorageNode
 
 __all__ = ["VDSSession"]
+
+
+def _partition_opening(
+    crs_n: CRSn,
+    root_idx: tuple[int, ...],
+    val_of: dict[int, int],
+    root_pi: Opening,
+    groups: Sequence[Sequence[int]],
+    out: list[tuple[tuple[int, ...], Opening]],
+) -> None:
+    """把覆盖 ``root_idx`` 的证明 ``root_pi`` 递归二分拆成 ``len(groups)`` 份。
+
+    每次把 ``groups`` 一分为二，对每个半区做一次 :func:`svc.disagg`
+    （代价 ∝ ``|root_idx|``），递归下去总代价 ``O(|root_idx|·log k)`` ——
+    相比「每组各做一次 :func:`~svc.open_subvector`」的 ``O(|root_idx|·k)``
+    省掉一个 ``log k`` 因子（审计【11】）。拆出来的仍是各组合法的
+    :math:`d(v \\setminus I)`，与直算逐位相同。
+
+    :param groups: 一组**两两不相交**的下标集合，其并集 ⊆ ``root_idx``
+    :param out: 输出，追加 ``(规范化后的分组, 该组的 Opening)``
+    """
+    if len(groups) == 1:
+        g = as_index_set(groups[0])
+        if g == root_idx:
+            out.append((g, root_pi))
+        else:
+            # k = 1 但该组只是 root 的真子集：仍需拆一次
+            out.append(
+                (
+                    g,
+                    disagg(
+                        crs_n,
+                        list(root_idx),
+                        [val_of[i] for i in root_idx],
+                        root_pi,
+                        g,
+                    ),
+                )
+            )
+        return
+
+    mid = len(groups) // 2
+    left_groups, right_groups = groups[:mid], groups[mid:]
+    left_idx = as_index_set(i for g in left_groups for i in g)
+    right_idx = as_index_set(i for g in right_groups for i in g)
+    root_list = list(root_idx)
+    vals = [val_of[i] for i in root_list]
+    pi_left = disagg(crs_n, root_list, vals, root_pi, left_idx)
+    pi_right = disagg(crs_n, root_list, vals, root_pi, right_idx)
+    _partition_opening(crs_n, left_idx, val_of, pi_left, left_groups, out)
+    _partition_opening(crs_n, right_idx, val_of, pi_right, right_groups, out)
 
 
 class VDSSession:
@@ -52,7 +104,7 @@ class VDSSession:
     :param l: 每个块的比特数。取 ``8 * 每块字节数``。
     :param lambda_bits: 安全参数 :math:`\\lambda`
     :param modulus_bits: 模数位长，``None`` 时取 ``16·λ``
-    :param seed: 随机种子（可复现）
+    :param seed: 随机种子。``None``（默认）表示走真随机 —— 想复现就显式传一个种子。
 
     .. note::
 
@@ -68,7 +120,7 @@ class VDSSession:
         l: int = 128,
         lambda_bits: int = 128,
         modulus_bits: int | None = None,
-        seed: bytes | str = b"vds-v2",
+        seed: bytes | str | None = None,
         primegen_cls: type = PrimeGen,
     ) -> None:
         self.n_max = n_max
@@ -208,8 +260,10 @@ class VDSSession:
     ) -> list[StorageNode]:
         """把文件按 ``assignments`` 分发给若干存储节点。
 
-        每个节点拿到的证据都是**独立生成**的子向量打开证明
-        :math:`\\pi_I`（不是从别处拆的），因为分发发生在文件刚建立时。
+        每个节点拿到的是**一个合法的子向量打开证明** :math:`\\pi_I`。
+        实现上先从整向量打开 :math:`\\pi_{[n]}` 出发，再按节点数**递归二分拆**
+        给各组，总代价 :math:`O(n\\log k)`（审计【11】）—— 拆出来的东西与
+        「每个节点各自 :func:`~svc.open_subvector`」逐位相同，只是不再独立生成。
         后续节点之间要合并/拆分走 :meth:`StorageNode.add_storage` /
         :meth:`StorageNode.rmv_storage`。
 
@@ -223,7 +277,9 @@ class VDSSession:
         groups = list(assignments)
         total = len(groups)
         seen: set[int] = set()
-        nodes: list[StorageNode] = []
+
+        # 先校验并收集「有效分组」，再统一算证明（审计【11】）。
+        live: list[tuple[int, tuple[int, ...]]] = []
         for idx, raw in enumerate(groups):
             I_set = as_index_set(raw)
             if not I_set:
@@ -237,10 +293,23 @@ class VDSSession:
             if I_set[-1] >= len(values):
                 raise ValueError(f"第 {idx} 组含越界下标 {I_set[-1]}")
             seen |= set(I_set)
+            live.append((idx, I_set))
 
-            pi_I = open_subvector(
-                crs_n, I_set, [values[i] for i in I_set], values
+        # 从整向量打开出发、按组数二分：k 台合计从 O(n·k) 降到 O(n·log k)。
+        val_of = dict(enumerate(values))
+        all_idx = as_index_set(range(len(values)))
+        proof_of: dict[tuple[int, ...], Opening] = {}
+        if live:
+            root_pi = open_subvector(crs_n, list(all_idx), values, values)
+            got: list[tuple[tuple[int, ...], Opening]] = []
+            _partition_opening(
+                crs_n, all_idx, val_of, root_pi, [I for _, I in live], got
             )
+            proof_of = dict(got)
+
+        nodes: list[StorageNode] = []
+        for done, (idx, I_set) in enumerate(live, start=1):
+            pi_I = proof_of[I_set]
             nodes.append(
                 StorageNode(
                     node_id=f"node-{idx}",
@@ -254,7 +323,7 @@ class VDSSession:
                 )
             )
             if progress is not None:
-                progress(idx + 1, total, f"node-{idx} 拿到 {len(I_set)} 块的证明")
+                progress(done, total, f"node-{idx} 拿到 {len(I_set)} 块的证明")
         return nodes
 
     # -------------------------------------------------------------------

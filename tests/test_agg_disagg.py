@@ -17,7 +17,6 @@ import pytest
 from svc import (
     agg,
     agg_many_to_one,
-    commit,
     disagg,
     disagg_one_to_many,
     open_subvector,

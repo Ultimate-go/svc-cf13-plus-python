@@ -1,4 +1,4 @@
-"""可复现的确定性随机源。
+"""确定性随机源，**不给种子时取真随机**。
 
 为什么不用标准库 ``random``
 ---------------------------
@@ -7,11 +7,19 @@
 的取模拒绝策略在不同 Python 版本间**没有跨版本保证**。
 本模块用 SHA-256 计数器模式自己实现，输出完全由种子决定，
 在任何 Python 版本、任何平台上都一样，便于复现论文里的实验数据。
+
+默认种子是随机的
+----------------
+**不传** ``seed`` 时取 ``os.urandom(32)``。理由见 :func:`~svc.scheme.setup`：
+隐藏阶群方案的安全性前提是「没人知道模数 :math:`N` 的分解」，
+而固定的默认种子会让任何人都能重算出一模一样的 :math:`N`（进而分解它）。
+要复现实验就**显式**传种子 —— 可复现变成显式的选择，而不是默认的陷阱。
 """
 
 from __future__ import annotations
 
 import hashlib
+import os
 
 __all__ = ["DeterministicRNG"]
 
@@ -19,14 +27,18 @@ __all__ = ["DeterministicRNG"]
 class DeterministicRNG:
     """SHA-256 计数器模式的伪随机源。
 
-    :param seed: 种子，可以是 ``bytes`` / ``str`` / ``int``。
+    :param seed: 种子，可以是 ``bytes`` / ``str`` / ``int``；
+                 ``None``（默认）表示取 ``os.urandom(32)``，即**真随机**。
+                 传入同一个种子必然得到同一条输出流。
 
     输出流 = ``SHA256(seed || counter)`` 拼接而成，``counter`` 从 0 递增。
     """
 
     __slots__ = ("_seed", "_counter", "_buf")
 
-    def __init__(self, seed: bytes | str | int = b"python-svc-v1") -> None:
+    def __init__(self, seed: bytes | str | int | None = None) -> None:
+        if seed is None:
+            seed = os.urandom(32)
         if isinstance(seed, str):
             seed = seed.encode("utf-8")
         elif isinstance(seed, int):

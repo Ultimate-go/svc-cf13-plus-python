@@ -52,6 +52,29 @@ def deployed(session):
     }
 
 
+@pytest.fixture(scope="module")
+def two_files(session):
+    """两份等长文件 + 各自的 4 个节点（并行 PoS 测试用）。
+
+    放在**模块级**而非 ``TestParallel`` 里：pytest 9 已弃用「class 作用域却写成
+    实例方法」的 fixture（会发 ``PytestRemovedIn10Warning``，见审计【20】）。
+    """
+    groups = [list(range(i, N_BLOCKS, 4)) for i in range(4)]
+    out = []
+    for tag in (b"A", b"B"):
+        delta, crs_n, values, _ = session.commit_bytes(
+            bytes([tag[0]]) * (N_BLOCKS * BLOCK_BYTES), BLOCK_BYTES
+        )
+        out.append(
+            {
+                "delta": delta, "crs_n": crs_n, "values": values,
+                "nodes": session.distribute(delta, values, groups),
+                "client": session.make_client(delta),
+            }
+        )
+    return out
+
+
 def _tampered(node: StorageNode, session, *, forge_proof: bool = False) -> StorageNode:
     """造一个「内容被改」或「证据被伪造」的节点。"""
     v = node.view
@@ -62,6 +85,21 @@ def _tampered(node: StorageNode, session, *, forge_proof: bool = False) -> Stora
         st = v.st
         fi = (v.FI[0] ^ 0xFF,) + v.FI[1:]
     return StorageNode(f"{node.node_id}-evil", session, LocalView(v.delta, st, v.I, fi))
+
+
+def _challenge_with(node, k=LAMBDA_POS, n=N_BLOCKS) -> Challenge:
+    """构造一个**必然打到 ``node``** 的挑战：先放进它的第一个下标，其余补足到 ``k``。
+
+    攻击类是「改坏某个节点、看聚合是否被拒」。如果挑战没打到那个节点，
+    它的份额是空的、会被聚合跳过，攻击就「没被触发」—— 断言会随随机挑战时灵时不灵。
+    所以这里**显式构造**挑战、不依赖随机命中（默认随机后必需，见审计【5】）。
+    """
+    idx = {node.I[0]}
+    for i in range(n):
+        if len(idx) >= k:
+            break
+        idx.add(i)
+    return Challenge(indices=tuple(sorted(idx)), n=n)
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +155,8 @@ class TestHonest:
         r = Challenge(indices=tuple(deployed["nodes"][0].I[:3]), n=deployed["delta"].n)
         empty = deployed["nodes"][1].pos_prove(r)
         assert empty.Q == ()
+        # 占位证据现在是**显式的空哨兵**，而不是假的 Opening(0, 0, ())（审计【27】）
+        assert not empty.has_proof()
 
     def test_聚合顺序无关(self, deployed):
         r = deployed["client"].pos_challenge(LAMBDA_POS)
@@ -161,7 +201,7 @@ class TestAttacks:
 
     @pytest.mark.parametrize("forge", [False, True])
     def test_篡改或伪造在聚合阶段被拒(self, deployed, session, forge):
-        r = deployed["client"].pos_challenge(LAMBDA_POS)
+        r = _challenge_with(deployed["nodes"][0])
         evil = _tampered(deployed["nodes"][0], session, forge_proof=forge)
         proofs = [evil.pos_prove(r)] + [n.pos_prove(r) for n in deployed["nodes"][1:]]
         with pytest.raises(ValueError):
@@ -169,7 +209,7 @@ class TestAttacks:
 
     @pytest.mark.parametrize("forge", [False, True])
     def test_宽容模式下报未收齐(self, deployed, session, forge):
-        r = deployed["client"].pos_challenge(LAMBDA_POS)
+        r = _challenge_with(deployed["nodes"][0])
         evil = _tampered(deployed["nodes"][0], session, forge_proof=forge)
         proofs = [evil.pos_prove(r)] + [n.pos_prove(r) for n in deployed["nodes"][1:]]
         b, agg = pos_aggregate_all(deployed["crs_n"], r, proofs, strict=False)
@@ -191,29 +231,31 @@ class TestAttacks:
         with pytest.raises(ValueError):
             pos_aggregate_all(deployed["crs_n"], r, [PoSProof(Q=(), F_Q=(), pi_Q=Opening(0, 0, ()))])
 
+    def test_空证明被误用于验证时给可读原因(self, deployed):
+        """``Q = ∅`` 的空证明不能通过验证，且理由可读（审计【27】）。
+
+        以前空证明的占位是 ``Opening(S_I=0, Lambda_I=0, I=())`` —— ``0`` 不是
+        群元素，被误传进验证只会得到「S_I 校验失败」这种看不出根因的结果。
+        现在占位是哨兵对象，验证会直接报「不带证据」。
+        """
+        from vds.pos import EMPTY_OPENING
+
+        r = deployed["client"].pos_challenge(LAMBDA_POS)
+        # 故意造一份「Q 与挑战对得上、但证据是空哨兵」的证明
+        fake = PoSProof(
+            Q=r.indices, F_Q=tuple(0 for _ in r.indices), pi_Q=EMPTY_OPENING
+        )
+        assert not fake.has_proof()
+        rep = deployed["client"].pos_ver(r, fake)
+        assert not rep.ok and rep.code.name == "BAD_SHAPE"
+        assert "空" in rep.message
+
 
 # ---------------------------------------------------------------------------
 # 并行 PoS
 # ---------------------------------------------------------------------------
 
 class TestParallel:
-    @pytest.fixture(scope="class")
-    def two_files(self, session):
-        groups = [list(range(i, N_BLOCKS, 4)) for i in range(4)]
-        out = []
-        for tag in (b"A", b"B"):
-            delta, crs_n, values, _ = session.commit_bytes(
-                bytes([tag[0]]) * (N_BLOCKS * BLOCK_BYTES), BLOCK_BYTES
-            )
-            out.append(
-                {
-                    "delta": delta, "crs_n": crs_n, "values": values,
-                    "nodes": session.distribute(delta, values, groups),
-                    "client": session.make_client(delta),
-                }
-            )
-        return out
-
     def test_一个挑战验两个文件(self, two_files):
         r = parallel_pos_challenge(N_BLOCKS, 12)
         items = []
@@ -229,8 +271,9 @@ class TestParallel:
         assert two_files[0]["delta"].C != two_files[1]["delta"].C
 
     def test_破坏其中一个不影响另一个的判定(self, two_files, session):
-        r = parallel_pos_challenge(N_BLOCKS, 12)
         good, bad_f = two_files
+        # 挑战必须打到坏文件的 node-0，否则它的坏份额会被跳过、攻击不触发
+        r = _challenge_with(bad_f["nodes"][0], k=12)
         _, good_agg = pos_aggregate_all(
             good["crs_n"], r, [n.pos_prove(r) for n in good["nodes"]]
         )

@@ -23,7 +23,7 @@
 :mod:`vds.storage_node`        ``StrgNode.*``
 :mod:`vds.client_node`         ``ClntNode.*``
 :mod:`vds.updates`             §8.2 的两段式更新（``PushUpdate``/``ApplyUpdate``）
-:mod:`vds.pos`                 附录 D.1 的存储证明（PoR / PDP）
+:mod:`vds.pos`                 附录 D.1 的存储证明（PoR）
 :mod:`vds.vds`                 :class:`~vds.vds.VDSSession`，组装全流程
 ============================  ==========================================
 
@@ -50,7 +50,9 @@
 * §8.2 的三种文件更新（``mod`` / ``add`` / ``del``）走**两段式**：
   :func:`push_update` 产出 :math:`\\Upsilon_\\Delta`，:func:`apply_update`
   先校验它再应用 —— 后者**不需要改动后的内容**；
-* 附录 D.1 的存储证明（PoR / PDP）见 :mod:`vds.pos`。
+* 附录 D.1 的存储证明 **PoR** 见 :mod:`vds.pos`。**PDP 不实现**：
+  它要 §8.1 的 ``PoKOpen'`` 与 :math:`U_r`，本方案（§5.2 单累加器）不含这些结构
+  —— 论文 Table 3 也明确记 VDS2 的 PDP 为 *no*。
 
 能力边界
 --------

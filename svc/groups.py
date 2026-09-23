@@ -20,17 +20,13 @@ from .mathbase import is_probable_prime
 from .rng import DeterministicRNG
 
 __all__ = [
-    "RSA_DEFAULT_EXPONENT",
+    "MIN_MODULUS_BITS",
     "gen_prime",
+    "draw_generator",
     "generate_primes",
     "HiddenOrderGroup",
 ]
 
-
-#: 固定的生成元 ``g``，取自参考实现 ``rust-yinyan`` 的 ``RSAGroup``。
-#: 它同时是 RSA 的公开指数，要求 :math:`\\gcd(g, \\varphi(N)) = 1`
-#: （这样 ``g`` 在 :math:`\\mathbb{Z}_N^{*}` 里才不会落入小阶子群）。
-RSA_DEFAULT_EXPONENT: int = 65547
 
 #: 最小的可接受模数位长。低于 64 位时 RSA 群没有意义，参考实现直接报错。
 MIN_MODULUS_BITS: int = 64
@@ -55,6 +51,31 @@ def gen_prime(rng: DeterministicRNG, bits: int) -> int:
             return candidate
 
 
+def draw_generator(rng: DeterministicRNG, n: int, totient: int) -> int:
+    """从 :math:`\\mathbb{Z}_N^{*}` 里**随机**抽一个生成元。
+
+    论文 §5.2 的公开参数是 :math:`g \\leftarrow\\$ \\mathbb{G}` —— 随机的。
+    本函数按这个要求从 ``[2, N)`` 均匀抽取，并要求
+
+    * :math:`\\gcd(g, N) = 1` —— ``g`` 必须是单位（否则根本不是群元素）；
+    * :math:`\\gcd(g, \\varphi(N)) = 1` —— 沿用清单 #9 的额外要求。
+
+    .. note::
+
+       真正保证 :math:`g` 的阶很大的是**均匀抽样**本身：
+       ``ord(g)`` 整除 :math:`\\lambda(N)`，而阶不超过 ``B`` 的元素至多 ``B`` 个，
+       所以随机抽到小阶元素的概率可忽略。后一条 ``gcd`` 检查只是清单的额外约定，
+       保留它不影响正确性。
+
+    :param n: 模数
+    :param totient: :math:`\\varphi(N)`，只在抽样期间用，调用方随后应丢弃
+    """
+    while True:
+        g = rng.randrange(2, n)
+        if math.gcd(g, n) == 1 and math.gcd(g, totient) == 1:
+            return g
+
+
 def generate_primes(
     rng: DeterministicRNG,
     bits: int,
@@ -63,7 +84,7 @@ def generate_primes(
 
     :param bits: 模数 ``N`` 的位长（例如 2048）。``p``、``q`` 各占一半。
     :returns: ``(N, g)``，其中 ``N = p*q`` 恰好 ``bits`` 位，
-              ``g`` 是固定值 :data:`RSA_DEFAULT_EXPONENT` 归约到 ``[1, N)``。
+              ``g`` 是 :func:`draw_generator` 从 :math:`\\mathbb{Z}_N^{*}` 里随机抽的。
 
     清单要求的四件事，逐一落实：
 
@@ -72,8 +93,9 @@ def generate_primes(
        但检查是白送的，留着）。
     3. **``φ(N)`` 生成后即丢弃** —— 局部变量算出后立刻 ``del``，
        函数返回的元组里只有 ``N`` 和 ``g``，调用方拿不到 ``p``、``q``。
-    4. **``gcd(g, φ(N)) = 1``** —— 用 ``gcd`` 检查；不满足就换一对 ``p``、``q``。
-       清单原文「g 取定值，且要求 g 与 φ(N) 互素」说的就是这件事。
+    4. **``g`` 随机且与 ``φ(N)`` 互素** —— 见 :func:`draw_generator`。
+       清单原文「g 取定值，且要求 g 与 φ(N) 互素」里的「取定值」部分
+       已按论文 §5.2 的 :math:`g \\leftarrow\\$ \\mathbb{G}` 改为随机抽取。
 
     另外还强制 **``N`` 的位长恰好等于 ``bits``**（参考实现同样有这个检查），
     这样论文里所有以位长表述的复杂度才有意义。
@@ -100,15 +122,11 @@ def generate_primes(
             continue
 
         totient = (p - 1) * (q - 1)
-
-        # g 与 φ(N) 必须互素，否则 g 的阶会退化
-        if math.gcd(RSA_DEFAULT_EXPONENT, totient) != 1:
-            continue
+        g = draw_generator(rng, n, totient)
 
         # 到这里 p、q、φ(N) 全部丢弃：只把 N 和 g 交出去
         del p, q, totient
 
-        g = RSA_DEFAULT_EXPONENT % n  # 归约到 [1, N)
         return n, g
 
 

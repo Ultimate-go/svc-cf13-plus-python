@@ -85,6 +85,7 @@ __all__ = [
     "AppliedUpdate",
     "push_update",
     "apply_update",
+    "new_digest_for_update",
     "update_modify",
     "update_append",
     "update_truncate",
@@ -151,6 +152,85 @@ def _membership_witnesses(S_K: int, K: Sequence[int], primegen, N: int) -> dict[
     """
     es = [primegen.get(i) for i in K]
     return dict(zip(K, batch_root_factor_any(S_K, es, N)))
+
+
+def _digest_mod(delta: Digest, K, deltas, S_i, N: int) -> Digest:
+    r"""``mod`` 之后的新摘要：:math:`U` 不变，:math:`C' = C \cdot \prod_{i \in K} S_i^{Δ_i}`。"""
+    C2 = delta.C
+    for i in K:
+        d = deltas[i]
+        if d:
+            C2 = C2 * pow(S_i[i], d, N) % N
+    return Digest(U=delta.U, C=C2, n=delta.n)
+
+
+def _digest_add(delta: Digest, K, F_new, primegen, N: int) -> Digest:
+    r"""``add`` 之后的新摘要：对 :math:`(U, C)` 顺序 :func:`svc.add_back`，:math:`n' = n + |K|`。"""
+    S_cur, Lam_cur = delta.U, delta.C
+    for j, v in zip(K, F_new):
+        S_cur, Lam_cur = add_back(S_cur, Lam_cur, primegen.get(j), v, N)
+    return Digest(U=S_cur, C=Lam_cur, n=delta.n + len(K))
+
+
+def _digest_del(delta: Digest, witness: UpdateWitness, K) -> Digest:
+    r"""``del`` 之后的新摘要就是 :math:`\Upsilon_\Delta` 里那份 :math:`\pi_K`。"""
+    if witness.pi_K is None:
+        raise ValueError("del 的 Υ∆ 里必须带 π_K（它就是新摘要）")
+    return Digest(U=witness.pi_K.S_I, C=witness.pi_K.Lambda_I, n=delta.n - len(K))
+
+
+def new_digest_for_update(
+    session, delta: Digest, op_delta: UpdateDelta, witness: UpdateWitness
+) -> Digest:
+    r"""只算「更新之后的摘要」:math:`\delta'`，**不碰任何本地数据**。
+
+    论文给客户端的那个算法只要 :math:`\delta'`：
+
+    .. code-block:: text
+
+        ClntNode.ApplyUpdate(δ, op, ∆, Υ∆) → (b, δ′)
+
+    客户端不持有内容，本来也算不出 ``st′``。三种 ``op`` 的公式
+    （推导见模块开头）：
+
+    ==========  ==========================================================
+    ``op``      :math:`\delta'`
+    ==========  ==========================================================
+    ``mod``     :math:`(U,\ C \cdot \prod_{i \in K} S_i^{Δ_i},\ n)`
+    ``add``     :math:`(U, C)` 对每个新位置 :func:`svc.add_back` 一次，
+                :math:`n' = n + |K|`
+    ``del``     :math:`\pi_K`（``Υ∆`` 里那份），:math:`n' = n - |K|`
+    ==========  ==========================================================
+
+    存储节点的 :func:`apply_update` 与客户端的
+    :meth:`~vds.client_node.ClientNode.apply_update` **共用这一个实现** ——
+    摘要的算法只有一份，两边不可能算出不同的 :math:`\delta'`。
+
+    :raises ValueError: ``op`` 未知，或 ``∆`` / ``Υ∆`` 的形状对不上
+    """
+    op, K = op_delta.op, witness.K
+    if not K:
+        raise ValueError("K 为空，推不出新摘要")
+    primegen, N = session.crs.primegen, session.crs.N
+
+    if op == "mod":
+        if len(witness.F_K) != len(K):
+            raise ValueError("Υ∆ 里的旧值个数与 K 不一致")
+        if len(op_delta.F_new) != len(K):
+            raise ValueError("∆ 里的新值个数与 K 不一致")
+        deltas = {i: op_delta.F_new[j] - witness.F_K[j] for j, i in enumerate(K)}
+        S_i = _membership_witnesses(witness.S_K, K, primegen, N)
+        return _digest_mod(delta, K, deltas, S_i, N)
+
+    if op == "add":
+        if len(op_delta.F_new) != len(K):
+            raise ValueError("∆ 里的新值个数与 K 不一致")
+        return _digest_add(delta, K, op_delta.F_new, primegen, N)
+
+    if op == "del":
+        return _digest_del(delta, witness, K)
+
+    raise ValueError(f"未知的 op {op!r}")
 
 
 def _S_K(session, delta: Digest, node: StorageNode | None, K: Sequence[int]) -> int:
@@ -288,7 +368,6 @@ def _mod_node_state(node, K, F_new, deltas, S_i, primegen, N):
     位置在 ``I`` 内的：只有值要换，证明不动。
     位置在 ``I`` 外的：:math:`\\Lambda_I` 要按差值修正。
     """
-    K_set = set(K)
     outside = [i for i in K if i not in set(node.I)]
 
     if not outside:
@@ -467,11 +546,7 @@ def _apply_mod(session, delta, node, op_delta, witness):
     deltas = {i: F_new[j] - witness.F_K[j] for j, i in enumerate(K)}
 
     S_i = _membership_witnesses(witness.S_K, K, primegen, N)
-    C2 = delta.C
-    for i in K:
-        if deltas[i]:
-            C2 = C2 * pow(S_i[i], deltas[i], N) % N
-    new_delta = Digest(U=delta.U, C=C2, n=delta.n)
+    new_delta = _digest_mod(delta, K, deltas, S_i, N)
 
     st_new, I_new, FI_new = _mod_node_state(node, K, F_new, deltas, S_i, primegen, N)
     return new_delta, st_new, I_new, FI_new
@@ -480,16 +555,12 @@ def _apply_mod(session, delta, node, op_delta, witness):
 def _apply_add(session, delta, node, op_delta, witness):
     F_new = op_delta.F_new
     primegen, N = session.crs.primegen, session.crs.N
-    n = delta.n
     if len(F_new) != len(witness.K):
         raise ValueError("∆ 里的新值个数与 K 不一致")
 
     K = witness.K
     e_K = e_of(primegen, K)
-    S_cur, Lam_cur = delta.U, delta.C
-    for j, v in zip(K, F_new):
-        S_cur, Lam_cur = add_back(S_cur, Lam_cur, primegen.get(j), v, N)
-    new_delta = Digest(U=S_cur, C=Lam_cur, n=n + len(K))
+    new_delta = _digest_add(delta, K, F_new, primegen, N)
 
     S_j = {j: pow(delta.U, e_K // primegen.get(j), N) for j in K}
     st_new, I_new, FI_new = _add_node_state(node, K, F_new, e_K, S_j, primegen, N)
@@ -502,14 +573,13 @@ def _apply_del(session, delta, node, op_delta, witness):
     if pi_K is None:
         raise ValueError("del 的 Υ∆ 里必须带 π_K（它就是新摘要）")
 
-    n_new = delta.n - len(K)
     if len(witness.F_K) != len(K):
         raise ValueError("Υ∆ 里的旧值个数与 K 不一致")
     if node.st.S_I is None:
         raise ValueError("节点状态不完整")
 
     # 新摘要就是 π_K（与论文 δ' ← ((Γ_K, ∆_K), n') 一致），先算好
-    new_delta = Digest(U=pi_K.S_I, C=pi_K.Lambda_I, n=n_new)
+    new_delta = _digest_del(delta, witness, K)
 
     I_set = set(node.I)
     if set(K) <= I_set:

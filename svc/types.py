@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import IntEnum
 from typing import NamedTuple, Sequence
 
@@ -50,7 +50,8 @@ class CRS:
     """``VC.Setup`` 的输出（对应清单 #18）。
 
     :param N: 隐藏阶群模数
-    :param g: 生成元（固定值 :data:`~svc.groups.RSA_DEFAULT_EXPONENT` 归约后）
+    :param g: 生成元，:math:`g \\leftarrow\\$ \\mathbb{Z}_N^{*}`（见
+              :func:`~svc.groups.draw_generator`）
     :param primegen: 下标 → 素数映射
     :param l: 每个元素的比特数；素数位长为 ``l + 1``
     """

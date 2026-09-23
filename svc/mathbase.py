@@ -30,11 +30,13 @@ from __future__ import annotations
 
 import hashlib
 from functools import reduce
+from math import gcd, isqrt
 from operator import mul
 from typing import Iterable, Sequence
 
 __all__ = [
     "is_probable_prime",
+    "is_bpsw_prime",
     "next_prime",
     "hash_prime",
     "egcd",
@@ -97,21 +99,198 @@ _SMALL_PRIMES: tuple[int, ...] = (
 # 1. is_probable_prime
 # ---------------------------------------------------------------------------
 
-def is_probable_prime(n: int, rounds: int | None = None) -> bool:
-    """Miller-Rabin 素性判定。对应清单 **#1**。
+def jacobi_symbol(a: int, n: int) -> int:
+    r"""Jacobi 符号 :math:`\left(\frac{a}{n}\right)`，``n`` 必须是正奇数。
+
+    只用二次互反律迭代，不做因式分解（:math:`O(\log^2 n)` 次位运算）。
+    Lucas 判据要靠它挑参数 ``D``。
+    """
+    if n <= 0 or n % 2 == 0:
+        raise ValueError("Jacobi 符号要求 n 是正奇数")
+    a %= n
+    result = 1
+    while a:
+        while a % 2 == 0:
+            a //= 2
+            if n % 8 in (3, 5):
+                result = -result
+        a, n = n, a
+        if a % 4 == 3 and n % 4 == 3:
+            result = -result
+        a %= n
+    return result if n == 1 else 0
+
+
+def _lucas_uv(n: int, P: int, Q: int, D: int, k: int) -> tuple[int, int, int]:
+    r"""Lucas 数列的第 ``k`` 项 ``(U_k, V_k, Q^k) mod n``。
+
+    用二进制链（只有乘法和平方，不出现除法）：
+
+    .. math::
+
+        U_{2m} = U_m V_m, \qquad V_{2m} = V_m^2 - 2Q^m \\
+        U_{2m+1} = \frac{P U_{2m} + V_{2m}}{2}, \qquad
+        V_{2m+1} = \frac{D U_{2m} + P V_{2m}}{2}
+
+    除以 2 在模 ``n``（奇数）下就是乘 ``(n+1)/2``。
+    """
+    if k == 0:
+        return 0, 2, 1
+    inv2 = (n + 1) // 2
+    Qmod = Q % n
+    U, V, Qk = 1, P % n, Qmod
+    for bit in bin(k)[3:]:          # 从次高位开始
+        U, V = U * V % n, (V * V - 2 * Qk) % n
+        Qk = Qk * Qk % n
+        if bit == "1":
+            U, V = (P * U + V) * inv2 % n, (D * U + P * V) * inv2 % n
+            Qk = Qk * Qmod % n
+    return U, V, Qk
+
+
+def is_strong_lucas_prp(n: int) -> bool:
+    r"""强 Lucas 可能素数判据（Selfridge 参数法）。
+
+    参数选取：取 :math:`D = 5, -7, 9, -11, \dots` 中第一个满足
+    :math:`\left(\frac{D}{n}\right) = -1` 的，然后
+    :math:`P = 1,\ Q = (1 - D)/4`。写 :math:`n + 1 = d \cdot 2^s`（``d`` 为奇数），
+    若
+
+    .. math::
+
+        U_d \equiv 0 \pmod n \quad \text{或} \quad
+        \exists\, 0 \le r < s:\ V_{d \cdot 2^r} \equiv 0 \pmod n
+
+    则通过。
+
+    单独用它是**有已知反例**的（不像 BPSW 那样至今无反例），
+    所以真正的判据是 :func:`is_bpsw_prime`。
+    """
+    if n < 2:
+        return False
+    if n == 2:
+        return True
+    if n % 2 == 0:
+        return False
+    # 完全平方数直接排除：它的 Jacobi(D, n) 永远不会是 -1，搜索不会终止
+    r = isqrt(n)
+    if r * r == n:
+        return False
+
+    D = 5
+    while True:
+        j = jacobi_symbol(D, n)
+        if j == -1:
+            break
+        if j == 0:
+            g = gcd(abs(D), n)
+            if g < n:
+                return False            # 撞出一个非平凡因子，直接合数
+            # n | |D|：n 自己就是那个小因子，与 D 撞上了，换下一个
+        D = -(D + 2) if D > 0 else 2 - D
+
+    P, Q = 1, (1 - D) // 4
+
+    # n + 1 = d * 2^s
+    d = n + 1
+    s = 0
+    while d % 2 == 0:
+        d //= 2
+        s += 1
+
+    U, V, Qk = _lucas_uv(n, P, Q, D, d)
+    if U == 0 or V == 0:
+        return True
+    for _ in range(s - 1):
+        V = (V * V - 2 * Qk) % n
+        Qk = Qk * Qk % n
+        if V == 0:
+            return True
+    return False
+
+
+def is_bpsw_prime(n: int) -> bool:
+    r"""Baillie-PSW 判据：**base-2 强可能素数** 且 **强 Lucas 可能素数**。
+
+    为什么用它
+    ----------
+    Miller-Rabin 的「误判概率 :math:`\le 4^{-k}`」只在基是**真随机**时成立。
+    本实现原先的基由 ``sha256(n)`` 派生 —— 也就是基序列是 ``n`` 的**确定性函数**，
+    那条概率界并不适用（要保「同一个 n 结论可复现」，就不能取真随机基）。
+
+    所以这里改用 BPSW：它**完全是 ``n`` 的确定性函数**（可复现），
+    同时至今**没有一个已知反例** —— 包括把所有 base-2 强伪素数逐个排除。
+    已知最小的「过 base-2 但被 Lucas 拦下」的合数是 2047。
+
+    与 BPSW 的通行定义一致：先试除小素数、再查完全平方，
+    然后 base-2 强可能素数 + 强 Lucas 两条都过才算。
+
+    :returns: ``True`` 表示（在该判据下）是素数
+    """
+    if n < 2:
+        return False
+    if n < 4:
+        return True                       # 2, 3
+    if n % 2 == 0:
+        return False
+
+    for p in _SMALL_PRIMES:
+        if n == p:
+            return True
+        if n % p == 0:
+            return False
+
+    r = isqrt(n)
+    if r * r == n:
+        return False                      # 完全平方数一定是合数
+
+    # 第一条：base-2 强可能素数
+    d = n - 1
+    s = 0
+    while d % 2 == 0:
+        d //= 2
+        s += 1
+    x = pow(2, d, n)
+    if x != 1 and x != n - 1:
+        for _ in range(s - 1):
+            x = x * x % n
+            if x == n - 1:
+                break
+        else:
+            return False
+
+    # 第二条：强 Lucas
+    return is_strong_lucas_prp(n)
+
+
+def is_probable_prime(
+    n: int, rounds: int | None = None, *, bpsw: bool = True
+) -> bool:
+    r"""素性判定。对应清单 **#1**。
 
     :param n: 待判定整数
-    :param rounds: 随机基的轮数。``None`` 表示按 ``n`` 的位长自动选取。
+    :param rounds: **额外**再跑多少轮 Miller-Rabin 基。``None``（默认）表示不额外跑。
+    :param bpsw: 超出确定性基的覆盖范围后，是否用 :func:`is_bpsw_prime`
+                 作判据（默认 ``True``）。
 
     行为
     ----
-    * ``n < 2`` → ``False``
-    * 小素数试除可判定的直接给出结论（这一步能筛掉 ~88% 的合数）
+    * ``n < 2`` → ``False``；小素数试除可判定的直接给出结论（筛掉 ~88% 的合数）
     * 对 ``n < 3.3e24``，用确定性的固定基集合，结论**一定正确**
-    * 对更大的 ``n``，在固定基之外再叠加若干随机基，误判概率上界 ``4^-rounds``
+      （这一条是 Laarhoven 的界：前 12 个素数作基就足够）
+    * 对更大的 ``n``，用 :func:`is_bpsw_prime`（base-2 强可能素数 + 强 Lucas）
 
-    注意这是 **probable** prime：密码学量级的合数骗过 40 轮 MR 的概率
-    远低于宇宙射线导致内存翻转的概率，工程上视为素数。
+    关于随机性
+    ----------
+    本函数原先在超界之后用 ``sha256(n)`` 派生的 LCG 生成「随机基」。
+    那是**确定性序列**，不是随机基 —— MR 那条 :math:`\\le 4^{-k}` 的界
+    对它并不成立（审计【6】）。现在改走 BPSW：它同样只依赖 ``n``，
+    所以「同一个 ``n`` 结论可复现」（这是原设计要保的性质）没丢，
+    但它至今**没有已知反例**，比任何固定轮数的确定性 MR 基都强。
+
+    :param rounds: 若显式给出正数，就在 BPSW 之外**再**跑 ``rounds`` 轮
+                   MR 基（基仍由 ``n`` 派生）—— 作为多一道保险，
+                  不再声称它带来 :math:`4^{-k}` 的界。
     """
     if n < 2:
         return False
@@ -156,18 +335,20 @@ def is_probable_prime(n: int, rounds: int | None = None) -> bool:
         # 上面的基已覆盖该范围，结论确定
         return True
 
-    # 第二组：随机基。用 n 本身派生确定性随机数，保证同一 n 结果可复现。
-    if rounds is None:
-        # 位长越大越不放心，基数随位长增长（上限 40）
-        rounds = min(40, 16 + n.bit_length() // 128)
+    # 第二组：超出确定基的覆盖范围 —— 用 BPSW
+    if bpsw and not is_bpsw_prime(n):
+        return False
 
-    seed = hashlib.sha256(n.to_bytes((n.bit_length() + 7) // 8, "big")).digest()
-    state = int.from_bytes(seed, "big")
-    for _ in range(rounds):
-        state = (state * 6364136223846793005 + 1442695040888963407) % (1 << 64)
-        a = 2 + state % (n - 3)
-        if _is_witness_to_compositeness(a):
-            return False
+    # 第三组（可选）：显式要求的额外 MR 轮数。
+    # 基由 n 派生（可复现），但它是确定性序列，所以这里不声称 4^-rounds 的界。
+    if rounds:
+        seed = hashlib.sha256(n.to_bytes((n.bit_length() + 7) // 8, "big")).digest()
+        state = int.from_bytes(seed, "big")
+        for _ in range(rounds):
+            state = (state * 6364136223846793005 + 1442695040888963407) % (1 << 64)
+            a = 2 + state % (n - 3)
+            if _is_witness_to_compositeness(a):
+                return False
     return True
 
 

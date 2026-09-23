@@ -8,6 +8,14 @@
 风格与文档里本来就有的那种代码块（``g^{e_[n]/e_I}``）保持一致。
 
 只处理代码围栏与已有反引号之外的区域。
+
+两种用法
+--------
+``python tools/fix_md_math.py [文件...]``
+    就地改写（默认扫全部 ``*.md``）。
+``python tools/fix_md_math.py --check [文件...]``
+    **只检查不写**：发现任何「还能再转换」或「还有残留 ``$``」的地方就
+    打印出来并以非零码退出。CI 里跑这个，可以挡住 LaTeX 格式回潮。
 """
 
 from __future__ import annotations
@@ -187,8 +195,33 @@ FENCE = re.compile(r"^(\s*)(```|~~~)")
 INLINE_CODE = re.compile(r"`+[^`]*`+")
 
 
-def convert_file(path: Path) -> tuple[int, int]:
-    lines = path.read_text(encoding="utf-8").split("\n")
+def residual_dollars(text: str) -> int:
+    """数「代码围栏与行内代码**之外**」还剩几个 ``$``。
+
+    不能直接 ``text.count("$")``：转换结果本身就可能带 ``$`` ——
+    比如论文的 :math:`\\leftarrow\\$`（抽样记号 ``←$ [n]``）
+    转出来是 `` `r_1,…,r_λpos ←$ [n]` ``，那个 ``$`` 在代码 span 里，
+    是**正确结果**，不该被判成「没转干净」。
+    """
+    n = 0
+    in_fence = False
+    for line in text.split("\n"):
+        if FENCE.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        n += INLINE_CODE.sub("", line).count("$")
+    return n
+
+
+def convert_text(text: str) -> tuple[str, int, int]:
+    """转换一段 Markdown，返回 ``(新文本, 块公式数, 行内公式数)``。
+
+    与「读文件 / 写文件」分开，``--check`` 才能在**不落盘**的前提下
+    判断「这份文档还有没有需要改的地方」。
+    """
+    lines = text.split("\n")
     out: list[str] = []
     in_fence = False
     n_block = n_inline = 0
@@ -244,47 +277,93 @@ def convert_file(path: Path) -> tuple[int, int]:
             pieces: list[str] = []
             pos = 0
             for code in INLINE_CODE.finditer(line):
-                pieces.append(_inline_math(line[pos : code.start()]))
+                chunk, cnt = _inline_math(line[pos : code.start()])
+                pieces.append(chunk)
+                n_inline += cnt
                 pieces.append(code.group(0))
                 pos = code.end()
-            pieces.append(_inline_math(line[pos:]))
-            new_line = "".join(pieces)
-            n_inline += 0
-            out.append(new_line)
+            chunk, cnt = _inline_math(line[pos:])
+            pieces.append(chunk)
+            n_inline += cnt
+            out.append("".join(pieces))
             i += 1
             continue
 
         out.append(line)
         i += 1
 
-    path.write_text("\n".join(out), encoding="utf-8")
-    return n_block, n_inline
+    return "\n".join(out), n_block, n_inline
 
 
-def _inline_math(seg: str) -> str:
-    """把一段（不含代码span的）文本里的 ``$...$`` 换成内联代码。"""
+#: 行内 ``$...$``。不跨行、不吃 ``$$``。
+INLINE_MATH = re.compile(r"(?<!\$)\$(?!\$)([^$\n]+?)\$(?!\$)")
+
+
+def _inline_math(seg: str) -> tuple[str, int]:
+    """把一段（不含代码 span 的）文本里的 ``$...$`` 换成内联代码。
+
+    :returns: ``(新文本, 替换了几处)`` —— 计数是为了 ``--check`` 的提示能说清
+              到底还有多少处没转。
+    """
+    n = 0
 
     def repl(m: re.Match) -> str:
+        nonlocal n
+        n += 1
         return "`" + latex_to_unicode(m.group(1)) + "`"
 
-    return re.sub(r"(?<!\$)\$(?!\$)([^$\n]+?)\$(?!\$)", repl, seg)
+    return INLINE_MATH.sub(repl, seg), n
 
 
 def main(argv: list[str]) -> int:
-    targets = [Path(p) for p in argv[1:]]
+    args = argv[1:]
+    check = "--check" in args
+    args = [a for a in args if a != "--check"]
+
+    targets = [Path(p) for p in args]
     if not targets:
         targets = sorted(Path(".").rglob("*.md"))
+
+    changed: list[Path] = []
+    dirty: list[Path] = []
     for p in targets:
         if ".pytest_cache" in p.parts:
             continue
         before = p.read_text(encoding="utf-8")
+        after, n_block, n_inline = convert_text(before)
+        left = residual_dollars(after)
+
+        if check:
+            if after != before:
+                changed.append(p)
+                print(
+                    f"  [待转换] {p}: 还能转 {n_block} 个块公式 / "
+                    f"{n_inline} 个行内公式"
+                )
+            elif left:
+                dirty.append(p)
+                print(f"  [残留 $] {p}: 还剩 {left} 个 $")
+            elif "$" not in before:
+                print(f"  跳过 {p}（没有数学公式）")
+            else:
+                print(f"  [已干净] {p}")
+            continue
+
         if "$" not in before:
             print(f"  跳过 {p}（没有数学公式）")
             continue
-        b, n = convert_file(p)
-        after = p.read_text(encoding="utf-8")
-        left = after.count("$")
-        print(f"  {p}: 块公式 {b} 个，剩余 $ 数 {left}")
+        p.write_text(after, encoding="utf-8")
+        print(
+            f"  {p}: 块公式 {n_block} 个，行内公式 {n_inline} 个，剩余 $ 数 {left}"
+        )
+
+    if check and (changed or dirty):
+        print(
+            f"\n--check 未通过：{len(changed)} 份文档还能再转换，"
+            f"{len(dirty)} 份还有残留 $。"
+            f"跑一次 `python tools/fix_md_math.py` 即可。"
+        )
+        return 1
     return 0
 
 

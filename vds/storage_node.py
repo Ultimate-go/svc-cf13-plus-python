@@ -6,6 +6,7 @@
 论文算法                 本模块
 ======================  ====================================================
 ``StrgNode.AddStorage``  :meth:`StorageNode.add_storage` —— 合并另一份存储
+                                                         或**一份检索凭证**
 ``StrgNode.RmvStorage``  :meth:`StorageNode.rmv_storage` —— 删掉一部分存储
 ``StrgNode.Retrieve``    :meth:`StorageNode.retrieve` —— 返回内容 + 证据
 ``StrgNode.CreateFrom``  :meth:`StorageNode.create_from` —— 从大文件里派生子文件
@@ -42,6 +43,7 @@ from svc.types import as_index_set
 from .digest import Digest, LocalView
 
 if TYPE_CHECKING:  # pragma: no cover
+    from .pos import PoSProof
     from .vds import VDSSession
 
 __all__ = ["StorageNode", "UpdateWitness", "UpdateDelta"]
@@ -134,6 +136,49 @@ class UpdateDelta:
         return f"UpdateDelta(op={self.op!r}, K={list(self.K)})"
 
 
+def _as_merge_source(other):
+    r"""把合并的来源统一成 ``(I, F_I, \pi_I, 标签, 是不是「裸凭证」)``。
+
+    ``StrgNode.AddStorage`` 在论文里的签名是
+    ``AddStorage(δ, st, I, F, Q, F_Q, π_Q)`` —— 第二个参数允许只给一份
+    **凭证** :math:`(Q, F_Q, \pi_Q)`，而不是一个完整的节点对象。
+    本节把三种写法归一：
+
+    * :class:`StorageNode` —— ``(I, F_I, \pi_I)`` 全都有，标签取 ``node_id``
+    * :class:`~vds.client_node.Certificate` —— 恰好就是 ``(Q, F_Q, \pi_Q)``
+    * 三元组 ``(Q, F_Q, \pi_Q)``
+
+    归一之后合并逻辑只写一份 —— 数学仍然只有 :func:`svc.agg` 那一处，
+    这里只负责**取字段**。
+
+    :raises TypeError: 来源不是上述任何一种
+    """
+    if isinstance(other, StorageNode):
+        return other.I, other.FI, other.st, other.node_id, False
+
+    if isinstance(other, Opening):
+        raise TypeError(
+            "合并来源不能是一个 Opening —— 要的是「下标 + 值 + 证明」三件套"
+            "（StorageNode / Certificate / (Q, F_Q, pi_Q)）"
+        )
+
+    if hasattr(other, "pi_Q") and hasattr(other, "F_Q"):
+        Q = getattr(other, "Q", ())
+        F_Q = getattr(other, "F_Q")
+        pi_Q = getattr(other, "pi_Q")
+        label = getattr(other, "source", "") or "凭证"
+    elif isinstance(other, (tuple, list)) and len(other) == 3:
+        Q, F_Q, pi_Q = other
+        label = "凭证"
+    else:
+        raise TypeError(
+            "AddStorage 的来源必须是一个 StorageNode、一份检索凭证"
+            "（有 Q / F_Q / pi_Q），或 (Q, F_Q, pi_Q) 三元组"
+            f"（收到 {type(other).__name__}）"
+        )
+    return as_index_set(Q), tuple(F_Q), pi_Q, label, True
+
+
 class StorageNode:
     """一个存储节点，持有文件的一部分 ``(I, F_I)`` 与对应的证据 ``π_I``。
 
@@ -201,9 +246,11 @@ class StorageNode:
 
     def add_storage(
         self,
-        other: "StorageNode",
+        other,
+        *,
+        verify_cert: bool = True,
     ) -> "StorageNode":
-        """``StrgNode.AddStorage`` —— 把另一个节点持有的部分合并进来。
+        r"""``StrgNode.AddStorage`` —— 把另一份存储（或一份检索凭证）合并进来。
 
         论文原文::
 
@@ -213,13 +260,47 @@ class StorageNode:
         换成 §5.2 的 :func:`svc.agg` 就是一次调用。前提是两份存储
         **不相交**；有重叠时先 :meth:`rmv_storage` 去掉重叠部分。
 
+        :param other: 另一个 :class:`StorageNode`，**或者**一份检索凭证
+                      —— :class:`~vds.client_node.Certificate` 或三元组
+                      ``(Q, F_Q, \pi_Q)``。论文给这个算法的签名本来就是
+                      ``AddStorage(δ, st, I, F, Q, F_Q, π_Q)``，
+                      §7 的意图是「任何人拿到一份合法凭证都能成为存储节点」，
+                      所以第二个参数不应当强制要求一个 :class:`StorageNode`。
+                      两条入口走的是**同一个** :func:`svc.agg`，数学只有一份。
+        :param verify_cert: 传凭证时才有意义。默认先按本节点的摘要验一遍凭证
+                            （直接复用 :func:`svc.verify`）。不验就合并，
+                            等于把一个**来源不明**的份额塞进本地视图，
+                            本节点会被悄悄毒掉 —— 而 :meth:`check_local_view`
+                            要等到事后抽查才会发现。
+        :raises ValueError: 下标重叠、摘要不一致，或凭证没通过验证
         :returns: 一个新的 :class:`StorageNode`（不修改原节点）
         """
-        if set(self.I) & set(other.I):
+        other_I, other_FI, other_st, label, is_cert = _as_merge_source(other)
+
+        if set(self.I) & set(other_I):
             raise ValueError(
                 "AddStorage 要求两份存储不相交；有重叠时请先 rmv_storage 去掉重叠"
             )
-        if self.view.delta != other.view.delta:
+
+        if is_cert:
+            if len(other_I) != len(other_FI):
+                raise ValueError(
+                    f"凭证里 Q（{len(other_I)} 个下标）与 "
+                    f"F_Q（{len(other_FI)} 个值）长度不一致"
+                )
+            if verify_cert:
+                report = svc_verify(
+                    self.crs_n(),
+                    self.view.delta.C,
+                    list(other_I),
+                    list(other_FI),
+                    other_st,
+                )
+                if not report.ok:
+                    raise ValueError(
+                        f"凭证没有通过本节点摘要的验证，拒绝合并：{report.message}"
+                    )
+        elif self.view.delta != other.view.delta:
             raise ValueError("两个节点的摘要不同，不能合并")
 
         crs_n = self.crs_n()
@@ -228,16 +309,16 @@ class StorageNode:
             list(self.I),
             list(self.FI),
             self.st,
-            list(other.I),
-            list(other.FI),
-            other.st,
+            list(other_I),
+            list(other_FI),
+            other_st,
         )
         # 值要从**两边一起**取：merged.I 是并集，
         # 单看 self.view 会因为缺 other 那部分而下标不存在。
         valmap = dict(zip(self.I, self.FI))
-        valmap.update(dict(zip(other.I, other.FI)))
+        valmap.update(dict(zip(other_I, other_FI)))
         return StorageNode(
-            f"{self.node_id}+{other.node_id}",
+            f"{self.node_id}+{label}",
             self.session,
             LocalView(
                 delta=self.view.delta,
@@ -245,6 +326,45 @@ class StorageNode:
                 I=merged.I,
                 FI=tuple(valmap[i] for i in merged.I),
             ),
+        )
+
+    @classmethod
+    def from_certificate(
+        cls,
+        node_id: str,
+        session: "VDSSession",
+        delta: Digest,
+        cert,
+        *,
+        verify: bool = True,
+    ) -> "StorageNode":
+        r"""从一份检索凭证**直接成为**一个存储节点。
+
+        :meth:`add_storage` 解决的是「已经有节点了，再合并一份凭证」；
+        这里解决的是「手里只有一份凭证，从头建立一个节点」——
+        也就是 §7 那句「任何人拿到一份合法凭证都能成为存储节点」。
+        本地视图就是 ``(δ, π_Q, Q, F_Q)``，不需要别的材料。
+
+        :param cert: :class:`~vds.client_node.Certificate`，或任意带
+                     ``Q`` / ``F_Q`` / ``pi_Q`` 三个属性的对象，
+                     或三元组 ``(Q, F_Q, \pi_Q)``
+        :param verify: 是否先验一遍凭证（复用 :func:`svc.verify`）；
+                       默认开 —— 摘要本来就拿在手里，验一次几乎免费
+        :raises ValueError: 凭证没通过验证
+        """
+        Q, F_Q, pi_Q, _label, _is_cert = _as_merge_source(cert)
+        if verify:
+            report = svc_verify(
+                session.crs_n_for(delta), delta.C, list(Q), list(F_Q), pi_Q
+            )
+            if not report.ok:
+                raise ValueError(
+                    f"凭证没有通过摘要的验证，不建立节点：{report.message}"
+                )
+        return cls(
+            node_id,
+            session,
+            LocalView(delta=delta, st=pi_Q, I=as_index_set(Q), FI=tuple(F_Q)),
         )
 
     # -------------------------------------------------------------------
@@ -333,7 +453,7 @@ class StorageNode:
 
         return pos_prove(self, challenge)
 
-    def pos_aggregate(self, challenge, left, right):
+    def pos_aggregate(self, challenge, left, right) -> "tuple[bool, PoSProof]":
         """``StrgNode.PoS-Aggregate`` —— 把两份部分证明合成一份。
 
         :returns: ``(b, π_r)``；``b = 1`` 表示已覆盖整个挑战

@@ -52,10 +52,22 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from svc import DeterministicRNG, Opening, fingerprint  # noqa: E402
-from vds import LocalView, StorageNode, VDSSession, join_blocks  # noqa: E402
+from svc import MIN_MODULUS_BITS, Opening, fingerprint  # noqa: E402
+from vds import LocalView, StorageNode, VDSSession  # noqa: E402
 
 WEB_DIR = ROOT / "web"
+
+# ---------------------------------------------------------------------------
+# 运行期配置（由命令行设置，见 :func:`main`）
+# ---------------------------------------------------------------------------
+
+#: 命令行给的默认种子。``None``（默认）= 每次真随机。
+#: ``/api/setup`` 自己带 ``seed`` 时以请求里的为准。
+DEFAULT_SEED: str | None = None
+
+#: ``--debug`` 时把 traceback 一起回传给浏览器；默认只把摘要回传，
+#: 完整堆栈留在服务端日志里。
+DEBUG: bool = False
 
 # ---------------------------------------------------------------------------
 # 演示状态
@@ -243,6 +255,11 @@ N_MAX_CAP = 65536        # n_max 硬上限，避免误传超大值
 
 BLOCK_BYTES_MIN = 1                      # 前端输入框 min
 BLOCK_BYTES_MAX = TUNE_LADDER[-1]        # 前端输入框 max（= 64）
+
+# 模数位长的可接受区间（审计【17】）：下限跟 svc 层一致，上限只取决于
+# 「演示时生成一次模数要花多久」—— 再大就会随机地跑很久。
+MODULUS_BITS_MIN = MIN_MODULUS_BITS      # = 64
+MODULUS_BITS_MAX = 4096
 
 
 def _per_byte_for(bb: int) -> tuple[float, float]:
@@ -517,7 +534,21 @@ def op_setup(payload: dict) -> dict:
     n_max = int(payload.get("n_max", 16))
     block_bytes = int(payload.get("block_bytes", 16))
     modulus_bits = int(payload.get("modulus_bits", 512))
-    seed = payload.get("seed", "web-demo")
+    # 参数上界（审计【17】）：后端只绑回环地址，但仍不该让一个请求把它拖很久。
+    # 这里不是静默 clamp，而是直接报错，好让前端知道参数得改。
+    if not 1 <= n_max <= N_MAX_CAP:
+        raise ValueError(f"n_max 必须在 1~{N_MAX_CAP} 之间，收到 {n_max}")
+    if not BLOCK_BYTES_MIN <= block_bytes <= BLOCK_BYTES_MAX:
+        raise ValueError(
+            f"每块字节数必须在 {BLOCK_BYTES_MIN}~{BLOCK_BYTES_MAX} 之间，收到 {block_bytes}"
+        )
+    if not MODULUS_BITS_MIN <= modulus_bits <= MODULUS_BITS_MAX:
+        raise ValueError(
+            f"模数位长必须在 {MODULUS_BITS_MIN}~{MODULUS_BITS_MAX} 之间，收到 {modulus_bits}"
+        )
+    # 不传 seed = 每次真随机（默认）；传了就是显式的「我要可复现」。
+    # 请求里没给时，回落到命令行 --seed。
+    raw_seed = payload.get("seed") or DEFAULT_SEED
 
     STATE.reset()
     PROGRESS.clear()
@@ -528,7 +559,7 @@ def op_setup(payload: dict) -> dict:
         l=block_bytes * 8,
         lambda_bits=16,
         modulus_bits=modulus_bits,
-        seed=str(seed).encode(),
+        seed=None if raw_seed in (None, "") else str(raw_seed).encode(),
     )
     ms = (time.perf_counter() - t0) * 1000.0
     PROGRESS.tick(1, 1)
@@ -764,6 +795,22 @@ def op_aggregate(payload: dict) -> dict:
     }
 
 
+def _returned_values(indices) -> list[int]:
+    """按下标从**本轮凭证**里取出「服务器实际返回的内容」。
+
+    验证必须对着服务器真正返回的 ``F_Q``，而不是本地保存的真值 ——
+    否则「验证通过」就与节点返回了什么无关了（审计【1】）。
+    """
+    table: dict[int, int] = {}
+    for cert in STATE.certs:
+        for i, v in zip(cert.Q, cert.F_Q):
+            table[int(i)] = int(v)
+    missing = [int(i) for i in indices if int(i) not in table]
+    if missing:
+        raise ValueError(f"服务器没有返回这些下标的内容：{missing}，无法验证")
+    return [table[int(i)] for i in indices]
+
+
 def op_verify(payload: dict) -> dict:
     session = _require_session()
     if STATE.pi_K is None:
@@ -771,7 +818,9 @@ def op_verify(payload: dict) -> dict:
 
     client = session.make_client(STATE.delta)
     Q = list(STATE.pi_K.I)
-    vals = [STATE.values[i] for i in Q]
+    # 用**服务器实际返回的内容**，而不是本地真值（审计【1】）：
+    # 否则节点把内容换掉、证据保持诚实时，「验证通过」仍会成立。
+    vals = _returned_values(Q)
     report, ms = _timed(client.ver_retrieve, Q, vals, STATE.pi_K)
 
     return {
@@ -866,7 +915,7 @@ def op_attack(payload: dict) -> dict:
     final = None
     if pi_K is not None:
         I_ = list(pi_K.I)
-        rep = client.ver_retrieve(I_, [STATE.values[i] for i in I_], pi_K)
+        rep = client.ver_retrieve(I_, _returned_values(I_), pi_K)
         final = {
             "ok": rep.ok,
             "code": rep.code.name,
@@ -1069,28 +1118,48 @@ class Handler(BaseHTTPRequestHandler):
                 result = fn(payload)
             self._send_json(result)
         except Exception as exc:  # noqa: BLE001
-            self._send_json(
-                {
-                    "ok": False,
-                    "error": f"{type(exc).__name__}: {exc}",
-                    "traceback": traceback.format_exc(limit=4),
-                },
-                400,
-            )
+            detail = f"{type(exc).__name__}: {exc}"
+            # 完整堆栈始终留在服务端日志；只有 --debug 时才回传给浏览器，
+            # 免得堆栈原样出现在页面上（审计【17】）。
+            print(f"[error] {path}: {detail}\n{traceback.format_exc()}", file=sys.stderr)
+            body: dict = {"ok": False, "error": detail}
+            if DEBUG:
+                body["traceback"] = traceback.format_exc(limit=4)
+            self._send_json(body, 400)
         finally:
             # 无论成败都收尾，否则前端会看到一个永远「进行中」的阶段
             PROGRESS.finish()
 
 
 def main() -> None:
+    global DEFAULT_SEED, DEBUG
     ap = argparse.ArgumentParser(description="SVC/VDS 演示服务器")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)
+    ap.add_argument(
+        "--seed",
+        default=None,
+        help="给 /api/setup 的默认随机种子；不给则每次真随机（不可复现）",
+    )
+    ap.add_argument(
+        "--debug",
+        action="store_true",
+        help="把异常堆栈一起回传给浏览器（默认只留在服务端）",
+    )
     args = ap.parse_args()
+
+    DEFAULT_SEED = args.seed
+    DEBUG = args.debug
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"SVC/VDS 演示服务已启动： http://{args.host}:{args.port}")
     print(f"静态页面目录： {WEB_DIR}")
+    if DEFAULT_SEED:
+        print(f"默认种子： {DEFAULT_SEED}（可复现；不传 seed 的 /api/setup 会用它）")
+    else:
+        print("默认种子： 无 —— 每次 /api/setup 都生成新的隐藏阶群（不可复现）")
+    if DEBUG:
+        print("调试模式： 开 —— 异常堆栈会回传给浏览器")
     print("按 Ctrl+C 停止。")
     try:
         httpd.serve_forever()

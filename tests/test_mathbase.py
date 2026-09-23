@@ -173,9 +173,6 @@ class TestShamirTrick:
     def test_同源自检(self):
         """两个根来自不同底数时必须拒绝，而不是硬算一个错值。"""
         x, y = 7, 11
-        g1, g2 = 111, 222
-        root_x = pow(pow(g1, 1, N), 1, N)
-        root_y = pow(pow(g2, 1, N), 1, N)
         # 直接构造两个不同源的「根」
         rx = pow(3, y, N)       # 对应 g = 3^(xy)
         ry = pow(5, x, N)       # 对应 g = 5^(xy)
@@ -185,7 +182,6 @@ class TestShamirTrick:
         """x、y 不互素时 Bézout 系数不是 1，硬算会静默出错，必须返回 None。"""
         x = y = 9
         r = 12345
-        g = pow(r, x * y, N)
         root_x = pow(r, y, N)
         root_y = pow(r, x, N)
         assert shamir_trick(root_x, root_y, x, y, N) is None
@@ -197,7 +193,6 @@ class TestShamirTrick:
         import math as _m
 
         L = x * y // _m.gcd(x, y)
-        g = pow(r, L, N)
         root_x = pow(r, L // x, N)
         root_y = pow(r, L // y, N)
         assert shamir_trick(root_x, root_y, x, y, N) is None

@@ -14,7 +14,7 @@ import pytest
 
 from svc import DeterministicRNG
 from vds import (
-    Digest,
+    Certificate,
     LocalView,
     StorageNode,
     VDSSession,
@@ -136,6 +136,34 @@ class TestDistribute:
     def test_每个节点都通过本地视图检查(self, file_setup):
         for node in file_setup["nodes"]:
             assert node.check_local_view(), f"{node.node_id} 本地视图不合法"
+
+    def test_节点证据与直算逐位相同(self, session, file_setup):
+        """审计【11】：distribute 改成「从整向量打开递归二分拆」之后，
+        每个节点的证据仍必须**逐位等于**直接 ``open_subvector`` 的结果 ——
+        拆出来的必须是同一个 :math:`d(v \\setminus I)`，免得「优化」悄悄换了证明。
+        这里故意用不均匀的分组覆盖非均衡的递归路径。
+        """
+        from svc import open_subvector
+
+        values = file_setup["values"]
+        crs_n = file_setup["crs_n"]
+        n = file_setup["delta"].n
+        groups = [
+            list(range(0, n, 4)),
+            list(range(1, n, 4)),
+            list(range(2, n, 4)),
+            list(range(3, n, 4)),
+        ]
+        nodes = session.distribute(
+            file_setup["delta"], values, groups, crs_n=crs_n
+        )
+        for node in nodes:
+            direct = open_subvector(
+                crs_n, list(node.I), [values[i] for i in node.I], values
+            )
+            assert node.st.S_I == direct.S_I
+            assert node.st.Lambda_I == direct.Lambda_I
+            assert node.check_local_view()
 
     def test_分配重叠报错(self, session, file_setup):
         with pytest.raises(ValueError, match="重叠"):
@@ -364,6 +392,119 @@ class TestNodeMerge:
         )
         with pytest.raises(ValueError, match="摘要不同"):
             a.add_storage(foreign)
+
+    # -- 【9】AddStorage 的凭证版入口 ------------------------------------
+
+    @staticmethod
+    def _cert_of(node, Q):
+        """从节点取一份检索凭证（Q, F_Q, π_Q）。"""
+        F_Q, pi_Q = node.retrieve(Q)
+        return Certificate(Q, F_Q, pi_Q, node.node_id)
+
+    def test_合并一份检索凭证(self, session, file_setup):
+        """论文的 AddStorage 允许第二个参数就是 (Q, F_Q, π_Q)。"""
+        a, b = file_setup["nodes"][0], file_setup["nodes"][1]
+        cert = self._cert_of(b, [4, 5, 6, 7])
+
+        merged = a.add_storage(cert)
+        assert merged.I == (0, 1, 2, 3, 4, 5, 6, 7)
+        assert merged.check_local_view()
+        assert merged.view.FI == tuple(file_setup["values"][:8])
+
+    def test_凭证也可以给三元组(self, session, file_setup):
+        a, b = file_setup["nodes"][0], file_setup["nodes"][1]
+        Q = [4, 5, 6, 7]
+        F_Q, pi_Q = b.retrieve(Q)
+
+        merged = a.add_storage((Q, F_Q, pi_Q))
+        assert merged.I == (0, 1, 2, 3, 4, 5, 6, 7)
+        assert merged.check_local_view()
+
+    def test_凭证版与节点版结果相同(self, session, file_setup):
+        a, b = file_setup["nodes"][0], file_setup["nodes"][1]
+        via_cert = a.add_storage(self._cert_of(b, [4, 5, 6, 7]))
+        via_node = a.add_storage(b)
+        assert via_cert.view.st == via_node.view.st
+        assert via_cert.I == via_node.I
+        assert via_cert.FI == via_node.FI
+
+    def test_被改过内容的凭证被拒(self, session, file_setup):
+        a, b = file_setup["nodes"][0], file_setup["nodes"][1]
+        cert = self._cert_of(b, [4, 5, 6, 7])
+        tampered = Certificate(cert.Q, (0,) + cert.F_Q[1:], cert.pi_Q, "evil")
+
+        with pytest.raises(ValueError, match="拒绝合并"):
+            a.add_storage(tampered)
+
+    def test_别的文件的凭证被拒(self, session, file_setup):
+        """凭证本身合法，但不是这份文件的 —— 摘要对不上。"""
+        a = file_setup["nodes"][0]
+        other = VDSSession(
+            n_max=N_MAX, l=L, lambda_bits=16, modulus_bits=512, seed=b"other-file"
+        )
+        o_delta, o_crs, o_vals, _ = other.commit_bytes(
+            b"y" * (N_MAX * BLOCK_BYTES), BLOCK_BYTES
+        )
+        o_node = other.distribute(o_delta, o_vals, [[4, 5, 6, 7]], crs_n=o_crs)[0]
+        cert = self._cert_of(o_node, [4, 5, 6, 7])
+
+        with pytest.raises(ValueError, match="拒绝合并"):
+            a.add_storage(cert)
+
+    def test_默认验凭证可以关掉(self, session, file_setup):
+        """verify_cert=False 时入口不再验 —— 挡下伪造品的责任落到 agg 的自检上。"""
+        a, b = file_setup["nodes"][0], file_setup["nodes"][1]
+        cert = self._cert_of(b, [4, 5, 6, 7])
+        tampered = Certificate(cert.Q, (0,) + cert.F_Q[1:], cert.pi_Q, "evil")
+
+        # 合法凭证关掉验证也照样能合
+        assert a.add_storage(
+            self._cert_of(b, [4, 5, 6, 7]), verify_cert=False
+        ).check_local_view()
+
+        # 默认：入口就挡下，且说清原因是「凭证没通过验证」
+        with pytest.raises(ValueError, match="拒绝合并"):
+            a.add_storage(tampered)
+        # 关掉之后：入口放行，改由 agg 内部的 ShamirTrick 自检兜底
+        with pytest.raises(ValueError, match="ShamirTrick"):
+            a.add_storage(tampered, verify_cert=False)
+
+    def test_凭证长度不一致被拒(self, session, file_setup):
+        a, b = file_setup["nodes"][0], file_setup["nodes"][1]
+        cert = self._cert_of(b, [4, 5, 6, 7])
+        with pytest.raises(ValueError, match="长度不一致"):
+            a.add_storage(Certificate(cert.Q, cert.F_Q[:2], cert.pi_Q))
+
+    def test_来源类型不对报错(self, session, file_setup):
+        a = file_setup["nodes"][0]
+        with pytest.raises(TypeError, match="StorageNode"):
+            a.add_storage(12345)
+        with pytest.raises(TypeError, match="Opening"):
+            a.add_storage(file_setup["nodes"][1].st)
+
+    # -- 【9】从凭证直接建立节点 ----------------------------------------
+
+    def test_from_certificate_从凭证建立节点(self, session, file_setup):
+        b = file_setup["nodes"][1]
+        cert = self._cert_of(b, [4, 5, 6, 7])
+
+        node = StorageNode.from_certificate(
+            "fresh", session, file_setup["delta"], cert
+        )
+        assert node.I == (4, 5, 6, 7)
+        assert node.check_local_view()
+        # 新节点能独立响应检索，客户端验得过
+        client = session.make_client(file_setup["delta"])
+        F_Q, pi_Q = node.retrieve([5, 7])
+        assert client.ver_retrieve([5, 7], list(F_Q), pi_Q).ok
+
+    def test_from_certificate_拒绝伪造凭证(self, session, file_setup):
+        b = file_setup["nodes"][1]
+        cert = self._cert_of(b, [4, 5, 6, 7])
+        bad = Certificate(cert.Q, (0,) + cert.F_Q[1:], cert.pi_Q, "evil")
+
+        with pytest.raises(ValueError, match="不建立节点"):
+            StorageNode.from_certificate("fresh", session, file_setup["delta"], bad)
 
 
 # ---------------------------------------------------------------------------

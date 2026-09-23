@@ -11,10 +11,13 @@
 1. :meth:`ClientNode.aggregate_certificates` —— ``AggregateCertificates``，
    把多份 :math:`\\pi_{Q_1}, \\dots, \\pi_{Q_k}` 合成**一个** :math:`\\pi_K`；
 2. :meth:`ClientNode.ver_retrieve` —— ``ClntNode.VerRetrieve``，
-   用摘要校验这一个 :math:`\\pi_K`。
+   用摘要校验这一个 :math:`\\pi_K`；
+3. :meth:`ClientNode.apply_update` —— ``ClntNode.ApplyUpdate``，
+   只凭 :math:`\\Delta` 与 :math:`\\Upsilon_\\Delta`
+   自己把摘要跟到新版本。
 
 关键的省法：合成之后**只验一次**，而不是每份验一次。
-而且验证代价与块数、与文件总长度都无关 ——
+而且验证代价与**文件长度 n 无关**，只与本次打开的下标个数 ``|Q|`` **线性** ——
 :math:`\\pi_K` 永远是两个群元素。
 """
 
@@ -27,6 +30,7 @@ from svc.types import as_index_set
 
 if TYPE_CHECKING:  # pragma: no cover
     from .digest import Digest
+    from .updates import AppliedUpdate, UpdateDelta, UpdateWitness
     from .vds import VDSSession
 
 __all__ = ["ClientNode", "Certificate"]
@@ -54,7 +58,11 @@ class Certificate:
 
 
 class ClientNode:
-    """客户端。持有摘要，负责聚合凭证与验证。"""
+    """客户端。持有摘要，负责聚合凭证、验证，以及自己跟上文件更新。
+
+    它**从不**持有文件内容 —— 全部能力都建立在「摘要只有两个群元素 +
+    一个整数」这一点上。要跟着文件更新走，用 :meth:`apply_update`。
+    """
 
     def __init__(self, session: "VDSSession", delta: "Digest"):
         self.session = session
@@ -88,6 +96,90 @@ class ClientNode:
             crs_n,
             [(c.Q, c.F_Q, c.pi_Q) for c in certs],
         )
+
+    # -------------------------------------------------------------------
+    # ClntNode.ApplyUpdate —— 客户端自己跟上更新
+    # -------------------------------------------------------------------
+
+    def apply_update(
+        self,
+        op_delta: "UpdateDelta",
+        witness: "UpdateWitness",
+    ) -> "AppliedUpdate":
+        r"""``ClntNode.ApplyUpdate(δ, op, ∆, Υ∆) → (b, δ′)``。
+
+        论文对这条算法只写了一句「与 ``StrgNode.ApplyUpdate`` 的第一段
+        几乎一样，区别在于客户端**只更新 δ**」—— 因为它不持有内容，
+        没有 ``st′`` 可算。所以这里返回的 :class:`~vds.updates.AppliedUpdate`
+        里 ``node`` 恒为 ``None``，只有 ``delta`` 有意义。
+
+        为什么必须有这一条：客户端**只持有摘要**是本方案的前提
+        （§7：没有任何节点需要知道整个文件）。如果客户端连更新都要去问
+        某个存储节点，那「不依赖任何单点」就落空了。有了它，
+        客户端收到 ``∆`` + ``Υ∆`` 就能自己算出 :math:`\delta'`。
+
+        三种 ``op`` 的 :math:`\delta'` 公式不是在这里重写的 ——
+        与存储节点共用 :func:`~vds.updates.new_digest_for_update`，
+        所以两边**不可能**算出不同的摘要。
+
+        .. note::
+
+           **本方法不改 ``self.delta``**：它只回答「新摘要是什么」。
+           采纳与否由调用方决定，:meth:`adopt_delta` 负责落库 ——
+           这样万一后续步骤失败，客户端还停在旧版本上。
+
+        .. warning::
+
+           客户端拿不到内容，所以**察觉不到重放**：一条 ``mod`` 的
+           :math:`\Upsilon_\Delta` 被重复投递时，:math:`U` 没变、
+           :math:`S_K` 仍是当前版本上合法的成员见证，:math:`\delta'`
+           也算得出来（只是又乘了一遍 :math:`\Delta_i`）。
+           这一条只有持有数据的存储节点能查 —— 见
+           :func:`~vds.updates.apply_update` 里 ``check_local_view`` 那一步。
+           多节点之间防重放要靠 ``∆`` 带序号或去重，不是靠这个函数。
+
+        :returns: ``AppliedUpdate``；``ok`` 为假时 :attr:`~vds.updates.AppliedUpdate.delta`
+                  为 ``None``
+        """
+        # 延迟导入：``vds.updates`` 依赖 ``vds.storage_node``，
+        # 放在模块顶层会让 ``client_node`` 多一条没必要的导入边。
+        from .updates import AppliedUpdate, new_digest_for_update
+
+        if op_delta.op != witness.op:
+            return AppliedUpdate(
+                False, f"∆ 与 Υ∆ 的 op 不一致（{op_delta.op} vs {witness.op}）"
+            )
+        if tuple(op_delta.K) != tuple(witness.K):
+            return AppliedUpdate(
+                False,
+                f"∆ 与 Υ∆ 的 K 不一致（{list(op_delta.K)} vs {list(witness.K)}）",
+            )
+
+        # 与存储节点用的是同一个 UpdateWitness.verify
+        ok, why = witness.verify(
+            self.session.crs.primegen, self.session.crs.N, self.delta.U
+        )
+        if not ok:
+            return AppliedUpdate(False, why)
+
+        try:
+            new_delta = new_digest_for_update(
+                self.session, self.delta, op_delta, witness
+            )
+        except ValueError as exc:
+            return AppliedUpdate(False, f"{exc}")
+
+        return AppliedUpdate(True, "", new_delta, None)
+
+    def adopt_delta(self, out: "AppliedUpdate") -> bool:
+        """采纳一份 :meth:`apply_update` 的结果；成功才落库。
+
+        :returns: 是否采纳（``out.ok`` 为假时原样返回 ``False``，摘要不动）
+        """
+        if not out.ok or out.delta is None:
+            return False
+        self.delta = out.delta
+        return True
 
     # -------------------------------------------------------------------
     # VerRetrieve

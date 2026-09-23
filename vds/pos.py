@@ -53,7 +53,6 @@ from svc import (
     Opening,
     VerifyReport,
     agg_many_to_one,
-    verify as svc_verify,
 )
 from svc.types import as_index_set
 
@@ -76,8 +75,24 @@ __all__ = [
 
 DEFAULT_LAMBDA_POS = 8
 
-#: ``Q`` 为空时用的占位证明体，内容不参与任何运算
-EMPTY_OPENING = Opening(S_I=0, Lambda_I=0, I=())
+
+class EmptyOpening:
+    """``Q = ∅`` 时那份「空证明」里占位用的证据对象（审计【27】）。
+
+    它**不是** :class:`~svc.Opening`，也不含任何群元素 —— 原来的写法是
+    ``Opening(S_I=0, Lambda_I=0, I=())``，但 ``0`` 不是群元素：万一它被误传进
+    验证，只会得到「S_I 校验失败」这种看不出根因的结果。换成独立类型后，
+    误用会立刻报出「这是空证明」这种可读的原因。
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - 仅调试用
+        return "EMPTY_OPENING(<空证明，不含群元素>)"
+
+
+#: ``Q = ∅`` 时的占位证据：**不含群元素**，任何验证遇到它都应立刻报错。
+EMPTY_OPENING = EmptyOpening()
 
 
 @dataclass(frozen=True)
@@ -101,14 +116,23 @@ class Challenge:
 
 @dataclass(frozen=True)
 class PoSProof:
-    """``π_r := (Q, F_Q, π_Q)``。"""
+    """``π_r := (Q, F_Q, π_Q)``。
+
+    ``Q = ∅`` 时 ``π_Q`` 是 :data:`EMPTY_OPENING`（不含群元素的哨兵），
+    用 :meth:`has_proof` 判断。这种空份额只能被聚合过程**跳过**，
+    不能直接拿去验证。
+    """
 
     Q: tuple[int, ...]
     F_Q: tuple[int, ...]
-    pi_Q: Opening
+    pi_Q: Opening | EmptyOpening
 
     def is_complete(self, challenge: Challenge) -> bool:
         return self.Q == challenge.indices
+
+    def has_proof(self) -> bool:
+        """这份证明是否带**真实**证据（即 ``Q ≠ ∅``）。"""
+        return not isinstance(self.pi_Q, EmptyOpening)
 
     def __repr__(self) -> str:  # pragma: no cover - 仅调试用
         return f"PoSProof(|Q|={len(self.Q)}, complete={self.Q})"
@@ -124,7 +148,9 @@ def pos_challenge(
     :param lambda_pos: 挑战的下标个数，论文记作 :math:`\\lambda_{pos}`。
                        被丢弃的数据比例必须小于 :math:`1/\\lambda_{pos}`
                        才可能答对（论文 Theorem D.2 里 :math:`\\mu^{\\lambda_{pos}}` 那一项）。
-    :param rng: 随机源；``None`` 时每次调用结果不同
+    :param rng: 随机源。``None``（默认）走真随机（``os.urandom`` 播种），
+                所以每次调用的挑战都不同；传一个带固定种子的
+                :class:`~svc.rng.DeterministicRNG` 可复现。
 
     论文写 ``r_1, ..., r_λpos ←$ [n]``（可重复），本实现**不放回抽样**，
     这样 :math:`|r|` 恒等于 ``lambda_pos``，覆盖度更可预测；``n < lambda_pos``
@@ -284,6 +310,13 @@ def pos_ver(
             detail.append(f"多出下标 {extra[:8]}" + ("…" if len(extra) > 8 else ""))
         return VerifyReport.fail(
             VerifyCode.BAD_SHAPE, "挑战未收齐：" + "；".join(detail)
+        )
+
+    if not proof.has_proof():
+        return VerifyReport.fail(
+            VerifyCode.BAD_SHAPE,
+            "这份证明不带证据（Q = ∅ 的空占位）：空份额无法验证，"
+            "请先聚合出覆盖整个挑战 r 的证明（Q = r）",
         )
 
     return client.ver_retrieve(list(proof.Q), list(proof.F_Q), proof.pi_Q)

@@ -70,7 +70,6 @@ from typing import Iterable, Sequence
 from .groups import MIN_MODULUS_BITS, generate_primes
 from .mathbase import (
     batch_root_factor_any,
-    batch_root_factor_general,
     group_div,
     product_tree,
     shamir_trick,
@@ -173,7 +172,7 @@ def s_subset(g: int, e_all: int, e_I: int, N: int) -> int:
         raise ValueError("e_I 不能为 0")
     if e_all % e_I != 0:
         raise ValueError(
-            f"e_I 不整除 e_all：说明 I 里有下标超出了 specialize 时用的 n"
+            "e_I 不整除 e_all：说明 I 里有下标超出了 specialize 时用的 n"
         )
     return pow(g, e_all // e_I, N)
 
@@ -193,8 +192,8 @@ def s_partial_root(g: int, e_all: int, e_I: int, e_j: int, N: int) -> int:
     divisor = e_j * e_I
     if e_all % divisor != 0:
         raise ValueError(
-            f"e_j * e_I 不整除 e_all：j 可能落在 I 里（这时代数是求不出根的），"
-            f"或下标越界"
+            "e_j * e_I 不整除 e_all：j 可能落在 I 里（这时代数是求不出根的），"
+            "或下标越界"
         )
     return pow(g, e_all // divisor, N)
 
@@ -398,12 +397,23 @@ def setup(
     :param lambda_bits: 安全参数 :math:`\\lambda`
     :param l: 每个元素的比特数 ``l``；素数位长为 ``l + 1``
     :param n: 向量长度
-    :param rng: 随机源，``None`` 用默认种子（便于复现）
+    :param rng: 随机源。``None``（默认）走 :class:`~svc.rng.DeterministicRNG`
+               的随机种子（``os.urandom``）—— **默认是不可复现的**。
+                要复现实验就显式传入一个带固定种子的
+                :class:`~svc.rng.DeterministicRNG`（``tests/`` 与 ``bench/`` 都是这么做的）。
     :param modulus_bits: 模数位长。``None`` 时取 ``16·λ``（λ=128 → 2048 位，
                          与论文实验配置一致）
     :param primegen_cls: 素数映射类型，默认双射版 :class:`~svc.primegen.PrimeGen`。
                          传 :class:`~svc.primegen.PrimeGenHash` 可切到哈希版对照。
     :returns: :class:`~svc.types.CRS` = ``(N, g, primegen, l)``
+
+    .. note::
+
+       **为什么默认不用固定种子。** 隐藏阶群方案的安全性前提是
+       「没人知道 :math:`N` 的分解」。若默认种子写死在源码里，
+       任何人都能重算出同一个 :math:`N` 并分解它 —— 该前提就不成立了。
+       所以这里把「可复现」变成**显式的选择**：想要可复现，
+       就自己传 ``rng=DeterministicRNG(b"...")``。
 
     .. note::
 
@@ -421,8 +431,7 @@ def setup(
     if modulus_bits is None:
         modulus_bits = max(MIN_MODULUS_BITS, 16 * lambda_bits)
 
-    if rng is None:
-        rng = DeterministicRNG(b"svc-v1-setup")
+    rng = rng if rng is not None else DeterministicRNG()
 
     N, g = generate_primes(rng, modulus_bits)
     primegen = primegen_cls(max_sz=n, bits=l + 1)
@@ -458,6 +467,25 @@ def specialize(crs: CRS, n: int) -> CRSn:
     return CRSn(crs=crs, U_n=U_n, e_all=e_all, n=n)
 
 
+def _check_value_range(crs_n: CRSn, values: Sequence[int], *, where: str) -> None:
+    """校验 ``0 <= v_i < 2^l``（论文 Table 1（p37）取 :math:`v \\in (\\{0,1\\}^l)^N`）。
+
+    这道检查下沉到 SVC 层，是为了让 :mod:`svc` **单独使用时**也不放进越界值 ——
+    VDS 层（:meth:`~vds.vds.VDSSession.commit_file`）本来就有，
+    但直接调用 :func:`commit` / :func:`open_subvector` 时没有（审计【7】）。
+
+    越界值里，**负值**会被 :func:`~svc.mathbase._pow_signed` 当成模逆静默算掉，
+    语义与论文不符；**超大值**只是让指数变长（更慢），代数上仍成立 —— 两者都拦下。
+    """
+    limit = 1 << crs_n.crs.l
+    for i, v in enumerate(values):
+        iv = int(v)
+        if iv < 0 or iv >= limit:
+            raise ValueError(
+                f"{where}: 值必须满足 0 <= v_i < 2^{crs_n.crs.l}，第 {i} 个值 {iv} 超出范围"
+            )
+
+
 def commit(
     crs_n: CRSn,
     vals: Sequence[int],
@@ -477,12 +505,14 @@ def commit(
                       清单 PS 说「前期使用 13 进行 debug，这里的 8 算大量内容更快，
                       但是出错不好修」—— 就是这个开关。
 
+    :raises ValueError: 向量长度与 ``crs_n.n`` 不符，或有 :math:`v_i \\notin [0, 2^l)`。
     :returns: :class:`~svc.types.Commitment`，其中 ``C`` 是**单个群元素，
               与向量长度无关**（succinct 的核心指标）。
     """
     n = len(vals)
     if n != crs_n.n:
         raise ValueError(f"向量长度 {n} 与 specialize 的 n = {crs_n.n} 不一致")
+    _check_value_range(crs_n, vals, where="commit")
 
     e_list = crs_n.crs.primegen.first(n)
 
@@ -514,6 +544,8 @@ def open_subvector(
     :param vals_I: 声明这些下标的值（会与 ``aux`` 交叉校验）
     :param aux: **整个向量**的值。:math:`\\Lambda_I` 里 ``j ∉ I`` 那部分的指数
                 要用到它们，所以必须传全量，不能只传 ``vals_I``。
+    :raises ValueError: ``I`` 有重复/越界下标、值个数不符、声明值与 ``aux`` 不符、
+                        或有 :math:`v_i \\notin [0, 2^l)`。
     :returns: :class:`~svc.types.Opening` —— **两个群元素，与向量长度和打开个数都无关**。
     """
     raw = list(I)
@@ -531,6 +563,9 @@ def open_subvector(
 
     if I_set and (I_set[0] < 0 or I_set[-1] >= crs_n.n):
         raise ValueError(f"I 里有下标越界（合法范围 0..{crs_n.n - 1}）")
+
+    # 值域校验：``aux`` 是整个向量，它合法 ⇒ 声明值也合法（后者还要与它交叉校验）
+    _check_value_range(crs_n, aux, where="open_subvector")
 
     # 交叉校验：声明的值与原始数据必须一致
     for idx, value in pairs:
@@ -570,10 +605,14 @@ def verify(
 
     第 2 步用 :func:`reconstruct_s_i`；第 3 步的乘积走 :func:`multi_exponentiate`。
     """
-    I_set = as_index_set(I)
+    # 先把 I 落成 list 再交给 as_index_set —— 后者内部会**消费**迭代器
+    # （对入参做一次 ``for i in indices``），若在下面再 ``list(I)`` 就只剩空表，
+    # 长度检查会把合法的 ``iter([...])`` 误判成「I 里有重复下标」（审计【8】）。
+    raw = list(I)
+    I_set = as_index_set(raw)
 
     # ---- 形状检查 ----
-    if len(I_set) != len(list(I)):
+    if len(I_set) != len(raw):
         return VerifyReport.fail(VerifyCode.BAD_SHAPE, "I 里有重复下标")
     if len(vals_I) != len(I_set):
         return VerifyReport.fail(
@@ -964,8 +1003,11 @@ def agg_many_to_one(
 
 # ---------------------------------------------------------------------------
 # 别名：清单 #21 里这个函数就叫 ``open``，与 Python 内置函数重名。
-# 主名用 open_subvector，这里在**模块级**再挂一个别名，
-# 这样 ``svc.scheme.open(...)`` 按清单的名字可用，
-# 同时 ``from svc.scheme import *`` 不会把内置 open 遮掉（__all__ 里没它）。
+# 主名用 open_subvector，这里在**模块级**再挂两个名字（审计【26】）：
+#   * ``open_alias`` —— 不遮蔽任何内置函数，需要「别名」时推荐用它；
+#   * ``open``       —— 按清单名字保留的兼容别名，**刻意**遮蔽内置 open
+#     （本模块内不需要内置 open；``__all__`` 里也不导出它，所以
+#     ``from svc.scheme import *`` 不会把内置 open 遮掉）。
 # ---------------------------------------------------------------------------
-open = open_subvector
+open_alias = open_subvector
+open = open_alias

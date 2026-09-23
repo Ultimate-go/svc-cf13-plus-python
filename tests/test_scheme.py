@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 
 from svc import (
-    Commitment,
+    DeterministicRNG,
     VerifyCode,
     commit,
     e_of,
@@ -177,7 +177,8 @@ class TestSetupSpecialize:
         assert crs.primegen.max_sz == 16
 
     def test_modulus_bits_默认值(self):
-        c = setup(lambda_bits=32, l=8, n=4)
+        # 显式给种子：默认路径现在是随机的，测试要的是「位长公式」这一条性质
+        c = setup(lambda_bits=32, l=8, n=4, rng=DeterministicRNG(b"modbits"))
         assert c.N.bit_length() == 512  # 16 · λ
 
     def test_specialize_的_U_n(self, crs):
@@ -312,6 +313,17 @@ class TestOpenVerify:
         # 证明里的下标与传入的不一致
         r = verify(crs_n, committed.C, [0, 1, 2], [values[i] for i in (0, 1, 2)], pi)
         assert r.code is VerifyCode.BAD_SHAPE
+
+    def test_迭代器下标不被误判(self, crs_n, values, committed):
+        """``I`` 传迭代器也必须能通过（审计【8】）。
+
+        形状检查会消费 ``I``：旧写法在检查之后才 ``list(I)``，拿到的已是空表，
+        于是把合法的 ``iter([...])`` 误判成「I 里有重复下标」。
+        """
+        vals_I = [values[i] for i in I_SAMPLE]
+        pi = open_subvector(crs_n, I_SAMPLE, vals_I, values)
+        r = verify(crs_n, committed.C, iter(I_SAMPLE), vals_I, pi)
+        assert r.ok, r.message
 
     def test_下标顺序不影响打开结果(self, crs_n, values):
         """I 会被规范化成升序元组，乱序传入应当得到同样的证明。"""

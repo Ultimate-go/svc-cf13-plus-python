@@ -19,11 +19,15 @@
 | **常量摘要** | 客户端只保存 `δ = ((U, C), n)` —— 两个群元素 + 一个整数，与文件大小无关 |
 | **常量证据** | 一次打开的证据是 `π_I = (S_I, Λ_I)` —— 两个群元素，与打开多少块无关 |
 | **增量聚合** | 从多台服务器拿到的多份证据能合成**一个**；合并结果仍是合法证明，可无限次继续合并 |
-| **存储证明** | 不下载任何内容，也能确认全网确实还存着文件（附录 D.1 的 PoR/PDP） |
+| **存储证明 PoR** | 不下载任何内容，也能确认全网确实还存着文件（附录 D.1 的通用构造） |
 | **可验证更新** | 增删改走两段式：持有改动内容的一方产出更新密钥 `Υ∆`，其他节点**无需该内容**就能校验并跟上 |
 
-验证代价与块数、文件长度**无关**：客户端拿到聚合后的那一个证据，
-用自己手里的摘要一次校验就完事。
+验证代价与**文件长度 n 无关**，只与本次打开的下标个数 `|Q|` **线性**：
+客户端拿到聚合后的那一个证据，用自己手里的摘要一次校验就完事。
+
+另注：PoR 的挑战下标本实现**不放回抽样**（论文写 `r_1,…,r_λpos ←$ [n]`，可重复），
+这样挑战个数恒为 `λ_pos`、覆盖度更可预测 —— 属于**更保守的偏离**，不是缺陷。
+细节与 Theorem D.2 的那一项见 `vds/pos.py` 的 `pos_challenge`。
 
 ---
 
@@ -44,6 +48,9 @@ python -m pytest
 ```bash
 python server/app.py            # 打开 http://127.0.0.1:8000
 ```
+
+> 演示后端只用标准库，`python server/app.py` 从**源码**直接跑。
+> `pip install .` 只装 `svc` / `vds` 两个算法包（不含 `server/` 与 `web/`）。
 
 页面上可以：设定参数 → 输入文件内容 → 一键跑完整流程 →
 看到摘要、每台服务器的状态、检索到的多份证据、聚合后的唯一证据、验证结果；
@@ -80,10 +87,11 @@ python_SVC_v1/
 │  └─ vds.py               VDSSession，串起 §8.2 的全流程
 ├─ server/app.py           零依赖演示后端（标准库 http.server）
 ├─ web/                    前端页面（原生 HTML/CSS/JS，无构建步骤）
-├─ tests/                  321 个测试
+├─ tests/                  871 个测试
 ├─ demo/end_to_end.py      §8.2 命令行端到端演示
-├─ bench/bench_scale.py    规模与性能测试
-├─ tools/fix_md_math.py    维护脚本：把文档里的 LaTeX 换成 Unicode
+├─ bench/bench_scale.py    规模与性能测试（并打印论文渐近值对照）
+├─ tools/fix_md_math.py    维护脚本：把文档里的 LaTeX 换成 Unicode（带 --check）
+├─ .github/workflows/      CI：pytest + ruff + 文档 LaTeX 检查
 └─ docs/                   设计说明与论文对照
 ```
 
@@ -221,20 +229,43 @@ assert 真聚合的结果 == 对新集合从零算一遍的结果
 ## 测试
 
 ```
-321 passed
+871 passed
 ```
 
 | 文件 | 覆盖 |
 |---|---|
 | `test_mathbase.py` | 清单 #1~#8，每个函数都用独立暴力实现对照 |
-| `test_primegen.py` | #9~#11，重点是**互异性**与位长约束 |
+| `test_primegen.py` | #9~#11，重点是**互异性**与位长约束；另含素性判据（BPSW、已知强伪素数、Jacobi 符号） |
 | `test_scheme.py` | #12~#22，双路径一致 + 失败环节可区分 |
 | `test_agg_disagg.py` | #23~#26，**真聚合 == 直算**、合并顺序无关、可反复合并 |
 | `test_core_abstraction.py` | 统一摘要层：`digest_of` / `add_back` 的等式 |
 | `test_fastopen.py` | §4.2 `PPCom` / `FastOpen`；块划分、等价性、代价形状 |
-| `test_vds.py` | §8.2 全流程 + 篡改/伪造/丢数据三类攻击 |
+| `test_vds.py` | §8.2 全流程 + 篡改/伪造/丢数据三类攻击；节点合并（含**凭证版入口**）与拆分 |
 | `test_updates.py` | 增删改：每次更新后节点视图合法 + 检索验证通过 + 内容按预期变化 |
-| `test_pos.py` | 附录 D.1 的 PoR / PDP 与并行聚合 |
+| `test_update_protocol.py` | §8.2 两段式协议本身：`ApplyUpdate` **不读改动后的内容**；含 `ClntNode.ApplyUpdate`（客户端只凭摘要跟上更新） |
+| `test_pos.py` | 附录 D.1 的 PoR 与并行聚合 |
+| `test_rng.py` | 随机源：默认真随机、显式种子才可复现 |
+| `test_server_ops.py` | 演示后端的接口约束：`/api/setup` 参数上下限、`/api/verify` 必须用**节点返回的内容**而不是本地缓存 |
+| `test_tune.py` | 文件大小 → 参数自适应（`/api/tune`）的代价模型与边界 |
+
+### 提交前跑什么
+
+CI（`.github/workflows/ci.yml`）在 Python 3.10 与 3.12 上跑这四件事，
+本地照着跑一遍即可：
+
+```bash
+python -m pytest                    # 单元测试
+ruff check .                        # 规则集写死在 pyproject.toml 的 [tool.ruff]
+python tools/fix_md_math.py --check # 文档里的 LaTeX 不许回潮
+python -m compileall -q svc vds server tools bench demo
+```
+
+两点说明：
+
+* **规则集是显式写死的**，不吃 ruff 的默认值 —— 本仓库实测 ruff 0.15 报 62 项、
+  0.16 报 184 项，靠默认值会让 CI 结论随一次升级而变。
+* `E741` / `E743`（`l` / `I` / `O` 这类名字）是**刻意放行**的：
+  它们是论文正文的记号，改名会让代码与论文对不上号。详见 `pyproject.toml` 里的注释。
 
 ---
 
@@ -246,12 +277,13 @@ assert 真聚合的结果 == 对新集合从零算一遍的结果
 |---|---|---|
 | 第二个 SVC（单个群元素的承诺） | §5.2、§4.2 | `svc/scheme.py`、`svc/fastopen.py` |
 | `VDS2`（基于 §5.2） | §7、§8.2 | `vds/` |
-| 存储证明 PoR / PDP | 附录 D.1 | `vds/pos.py` |
+| 存储证明 PoR（附录 D.1 的通用构造） | 附录 D.1 | `vds/pos.py` |
 
 ### 仍然没做的
 
 | 未实现 | 原因 |
 |---|---|
+| PDP（数据持有性证明） | 论文 Table 3（p60）明确记 VDS2 的 PDP = *no*（脚注 1）：它要 §8.1 的 `PoKOpen'` 与 `U_r`。本方案只有 §5.2 的单累加器结构，所以只实现 **PoR** |
 | 附录 C 的 `PoKChange` / `PoKAdd` / `PoKDelete` | 三种更新的**零知识**论证，建在另一个 SVC 构造上，不在本项目范围内。本实现的 §8.2 更新走「发布 `Υ_∆` + `VC.Ver'` 验证」，功能上已是完整的一条链，只是 `mod` / `del` 的 `Υ_∆` 里会带上旧值 |
 | 并行化 | 素数生成与大批量模幂目前单线程。加速要用 `multiprocessing` 而非线程 —— CPython 的模幂计算期间**持有 GIL** |
 | 附录 A / B / D.2 / E / F | A 是 `PoProd` 的低效写法（论文自己说更慢，属于另一个 SVC 构造）、B 是 [BBF19] 方案的预处理分析、D.2 是另一套 VDS 的 PDP（附录 D.1 的通用 PoR 已实现）、E 是强安全变体（验证时间线性于文件长度）、F 是与 BBF19 的实测对比 |

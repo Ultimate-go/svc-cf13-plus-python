@@ -44,16 +44,17 @@ Applications to Verifiable Decentralized Storage*, **§5.2**。
 .. note::
 
    ``open_subvector`` 就是清单 #21 里的 ``open``。
-   因为 ``open`` 是 Python 内置函数，包顶层不用这个名字导出，
-   但 ``svc.scheme.open(...)`` 这个别名依然可用。
+   因为 ``open`` 是 Python 内置函数，包顶层不用这个名字导出；
+   模块级别名 ``svc.scheme.open_alias(...)``（推荐）与 ``svc.scheme.open(...)``
+   两个都可用。
 """
 
 from __future__ import annotations
 
 from .groups import (
     MIN_MODULUS_BITS,
-    RSA_DEFAULT_EXPONENT,
     HiddenOrderGroup,
+    draw_generator,
     gen_prime,
     generate_primes,
 )
@@ -64,6 +65,7 @@ from .mathbase import (
     egcd,
     group_div,
     hash_prime,
+    is_bpsw_prime,
     is_probable_prime,
     mod_inverse,
     multiexp,
@@ -121,12 +123,13 @@ __all__ = [
     "__version__",
     # groups
     "MIN_MODULUS_BITS",
-    "RSA_DEFAULT_EXPONENT",
     "HiddenOrderGroup",
+    "draw_generator",
     "gen_prime",
     "generate_primes",
     # mathbase
     "is_probable_prime",
+    "is_bpsw_prime",
     "next_prime",
     "hash_prime",
     "egcd",
@@ -148,7 +151,6 @@ __all__ = [
     "DeterministicRNG",
     # scheme
     "DEFAULT_MODULUS_BITS",
-    "VectorDigest",
     "digest_of",
     "add_back",
     "e_of",

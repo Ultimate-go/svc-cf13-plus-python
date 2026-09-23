@@ -1,0 +1,48 @@
+name: CI
+
+# 目的很窄：把「论文正确性」和「工程整洁」两件事都钉成可复现的检查。
+# 核心算法零第三方依赖，所以这里唯一的依赖就是 pytest 与 ruff。
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: pytest + ruff (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # pyproject.toml 声明 requires-python = ">=3.10"，这里把两端都跑一遍
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: 安装（核心零依赖，只装 dev 组的 pytest）
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: 字节码编译
+        # 文档字符串里的 LaTeX 反斜杠若落在**非 raw** 字符串里，CPython 会判成
+        # 非法转义；本项目又把 SyntaxWarning 升级成了 error（见 pyproject.toml
+        # 的 filterwarnings）。compileall 能在跑测试之前就把这类问题抓出来。
+        run: python -m compileall -q svc vds server tools bench demo
+
+      - name: 单元测试
+        run: python -m pytest
+
+      - name: ruff
+        # 规则集写死在 pyproject.toml 的 [tool.ruff]，不随 ruff 版本漂移
+        run: |
+          python -m pip install ruff
+          ruff check .
+
+      - name: 文档里的 LaTeX 不许回潮
+        run: python tools/fix_md_math.py --check
